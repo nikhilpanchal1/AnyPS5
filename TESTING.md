@@ -122,6 +122,19 @@ ANYPS5_REQUIRE_VULKAN=1 GALLIUM_OVERRIDE_CPU_CAPS=avx \
   -R '^agc_(spirv_(narrow_constant_store|optimizer)|driver_constant_store)(_full|_none)?$'
 ```
 
+SPIR-V header/version regressions do not require a Vulkan device. With
+SPIRV-Tools enabled, run both byte orders, legal versions, requested limits and
+malformed inputs in the three isolated optimizer modes:
+
+```bash
+ctest --test-dir build --output-on-failure --no-tests=error --timeout 120 \
+  --repeat until-fail:3 -R '^agc_spirv_version(_full|_none)?$'
+```
+
+These tests independently validate fixtures and optimized output, check that
+inputs remain unchanged and require exact word preservation in `none` mode.
+They do not establish shader execution or vendor GPU behavior.
+
 Require Vulkan so an unavailable device fails the GPU run. Disable the emulator
 and Mesa caches when proving the changed compilation/execution path. Cold-cache
 testing does not replace warm-cache behavior checks for a cache-related change.
@@ -178,11 +191,19 @@ Evidence checked on 2026-10-08:
 | Mesa 26.1.6 llvmpipe works in the prepared image; 25.0.7 failed an existing color-comparison test | Inspect the selected ICD/driver before blaming a GPU failure on the patch | This image; see `/workspace/.anyps5/start.md` |
 | This runtime returns ENOSYS for userfaultfd; llvmpipe subgroups have eight lanes | Report write-tracking and unsupported subgroup skips separately | They do not cover those paths; the last full run had 23 skips, not a permanent expected count |
 | Optimizer validation plus real GPU readback caught the narrow-constant bug | Pair compiler-level checks with execution when shader behavior changes | [PR #1343](https://github.com/boykopovar/AnyPS5/pull/1343); local Linux ON/OFF suites and cold regressions passed three times |
-| Byte-swapped valid fixtures exposed an inherited raw-version comparison issue | Exercise supported byte order and inspect why malformed-input tests reject | Swapped SPIR-V 1.3 was rejected before validation on the tested revision; tests used supported 1.1 and retained native 1.3. Recheck current source |
+| The raw SPIR-V version guard rejected valid byte-swapped 1.3 modules | Check both byte orders, stricter requested limits, diagnostic ordering and input preservation in every optimizer mode | Locally verified against the original optimizer and the fix; SPIR-V 1.0–1.6 fixtures, eight Vulkan/SPIR-V targets, ASan/UBSan on the wrapper/harness. [Version-validation commit](https://github.com/nikhilpanchal1/AnyPS5/commit/ada2bb8973371898749a3935b53fd7834edc517a) |
 | Windows/NVIDIA tests independently confirmed the same fix | Match the tested revision and attribute external evidence | [Windows report](https://github.com/boykopovar/AnyPS5/pull/1343#issuecomment-6050894615): 413 passes; nine cold regressions repeated three times. External report, not a local Windows run |
 | Windows documentation-link checking used host path separators | Diagnose the checker failure separately from source behavior | [PR #1254](https://github.com/boykopovar/AnyPS5/pull/1254). Check whether it has landed; do not silently patch the checker to claim a standard pass |
 | A physical NVIDIA validation run needed an existing write-watch override | Check device/memory-import setup when SPIR-V-only tests pass but GPU submission fails | [Linux/NVIDIA report](https://github.com/boykopovar/AnyPS5/pull/1343#pullrequestreview-5449893004) used `APS5_WRITE_WATCH_IMPORTS=watch`; platform-specific, related to #1329 |
 | An overlap-bot warning can identify shared CMake/doc edits | Inspect the actual overlap and current mergeability before declaring a dependency | Use the current PRs and diffs; shared insertion points alone do not prove duplicate functionality |
+
+The unchanged `agc_driver_flat_store` fixture exceeded the 120-second limit
+with SPIRV-Tools ON and OFF on the prepared llvmpipe image at `a5df1a87`.
+The original optimizer also timed out at `7fccb7ff`. Compare the same fixture,
+cache state and device before attributing this timeout to an optimizer patch;
+[#1171](https://github.com/boykopovar/AnyPS5/pull/1171) investigates a smaller
+fixture. These are host-specific observations, not an expected failure on every
+platform.
 
 ## 7. Add or revise a lesson
 
