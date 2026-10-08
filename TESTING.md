@@ -145,6 +145,11 @@ For focused memory-safety checks, compile the changed code with
 `UBSAN_OPTIONS=halt_on_error=1`. State which code was instrumented; a sanitized
 harness linked to uninstrumented dependencies does not cover those dependencies.
 
+If LeakSanitizer reports that it cannot run under ptrace, record leak coverage
+as unavailable. Run the remaining ASan/UBSan checks with
+`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`; this does not establish leak safety.
+The restricted runtime used on 2026-10-08 had this tracing limitation.
+
 ## 5. Final CI and contribution checks
 
 After focused checks, use the Linux build workflow's full sequence: configure,
@@ -191,7 +196,8 @@ Evidence checked on 2026-10-08:
 | Mesa 26.1.6 llvmpipe works in the prepared image; 25.0.7 failed an existing color-comparison test | Inspect the selected ICD/driver before blaming a GPU failure on the patch | This image; see `/workspace/.anyps5/start.md` |
 | This runtime returns ENOSYS for userfaultfd; llvmpipe subgroups have eight lanes | Report write-tracking and unsupported subgroup skips separately | They do not cover those paths; the last full run had 23 skips, not a permanent expected count |
 | Optimizer validation plus real GPU readback caught the narrow-constant bug | Pair compiler-level checks with execution when shader behavior changes | [PR #1343](https://github.com/boykopovar/AnyPS5/pull/1343); local Linux ON/OFF suites and cold regressions passed three times |
-| The raw SPIR-V version guard rejected valid byte-swapped 1.3 modules | Check both byte orders, stricter requested limits, diagnostic ordering and input preservation in every optimizer mode | Locally verified against the original optimizer and the fix; SPIR-V 1.0–1.6 fixtures, eight Vulkan/SPIR-V targets, ASan/UBSan on the wrapper/harness. [Version-validation commit](https://github.com/nikhilpanchal1/AnyPS5/commit/ada2bb8973371898749a3935b53fd7834edc517a) |
+| The restricted sandbox denied TCP/UDP socket creation with EPERM | Compare failures with a direct host socket probe before attributing them to a source change | Locally verified on 2026-10-08; guest net, UDP, poll and TCP tests failed, and guest filesystem also required a UDP socket. No permission or proxy changes were needed for diagnosis |
+| The raw SPIR-V version guard rejected valid byte-swapped 1.3 modules | Check both byte orders, stricter requested limits, diagnostic ordering and input preservation in every optimizer mode | Locally verified against the original optimizer and the fix; SPIR-V 1.0–1.6 fixtures, eight Vulkan/SPIR-V targets, ASan/UBSan on the wrapper/harness. [Version-validation commit](https://github.com/nikhilpanchal1/AnyPS5/commit/c2dad207adf27bcf7bf66cbe359c7c4af99d2b35) |
 | Windows/NVIDIA tests independently confirmed the same fix | Match the tested revision and attribute external evidence | [Windows report](https://github.com/boykopovar/AnyPS5/pull/1343#issuecomment-6050894615): 413 passes; nine cold regressions repeated three times. External report, not a local Windows run |
 | Windows documentation-link checking used host path separators | Diagnose the checker failure separately from source behavior | [PR #1254](https://github.com/boykopovar/AnyPS5/pull/1254). Check whether it has landed; do not silently patch the checker to claim a standard pass |
 | A physical NVIDIA validation run needed an existing write-watch override | Check device/memory-import setup when SPIR-V-only tests pass but GPU submission fails | [Linux/NVIDIA report](https://github.com/boykopovar/AnyPS5/pull/1343#pullrequestreview-5449893004) used `APS5_WRITE_WATCH_IMPORTS=watch`; platform-specific, related to #1329 |
