@@ -394,6 +394,15 @@ void driverStoreTests(const Context& context, Recorder& recorder) {
     }
 }
 
+void untrackedDriverProvenanceTests() {
+    constexpr std::uint64_t outside = 0;
+    constexpr std::size_t bytes = 64;
+    Require(!Memory::Watched(outside, bytes), "the untracked driver-store range is watched");
+    Require(Memory::DriverStoredOver(outside, bytes, Memory::TrackerGeneration()), "an untracked range claims no driver store");
+    Require(!Memory::DriverStoredOver(outside, 0, 0), "an empty unknown range contains a driver store");
+    std::cout << "Untracked driver provenance tests passed\n";
+}
+
 void driverProvenanceTests(const Context& context, Recorder& recorder) {
     Surface surface(context, recorder, 8192);
     const auto address = surface.Address();
@@ -413,15 +422,10 @@ void driverProvenanceTests(const Context& context, Recorder& recorder) {
     for (std::uint64_t piece = 0; piece < 6; ++piece) Memory::MarkWritten(pieces + piece * 64, 4);
     Require(Memory::DriverStoredOver(pieces, 4, history), "evicted newer driver history was treated as no store");
     Require(Memory::DriverStoredOver(address, 64, 0), "an unknown baseline generation claims no driver store");
-    std::array<std::byte, 64> unwatched{};
-    const auto outside = reinterpret_cast<std::uint64_t>(unwatched.data());
-    Require(!Memory::Watched(outside, unwatched.size()), "the untracked driver-store fixture is watched");
-    Require(Memory::DriverStoredOver(outside, unwatched.size(), Memory::TrackerGeneration()), "unwatched memory claims no driver store");
     const auto huge = std::numeric_limits<std::size_t>::max() - static_cast<std::size_t>(address);
     Require(Memory::DriverStoredOver(address, huge, generation), "a huge uncovered range claims no driver store");
     Require(Memory::DriverStoredOver(address, std::numeric_limits<std::size_t>::max(), generation), "an overflowing range claims no driver store");
     Require(!Memory::DriverStoredOver(address, 0, generation), "an empty watched range contains a driver store");
-    Require(!Memory::DriverStoredOver(outside, 0, 0), "an empty unknown range contains a driver store");
 }
 
 void reregisteredEdgeTests(const Context& context, Recorder& recorder) {
@@ -622,6 +626,7 @@ void edgePrecedenceTests(const Context& context, Recorder& recorder) {
 
 int main() {
     try {
+        untrackedDriverProvenanceTests();
         std::unique_ptr<AgcDriver::Tests::RecorderDevice> device;
         try {
             device = std::make_unique<AgcDriver::Tests::RecorderDevice>();
