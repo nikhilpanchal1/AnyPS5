@@ -205,10 +205,8 @@ void retireImport(VkDevice device, HostImports& state, std::map<std::uint64_t, H
 
 const char* bindImport(const Context& context, HostImport& entry, VkExternalMemoryHandleTypeFlagBits handleType, const void* import, std::uint32_t importTypes, bool& allocated, VkResult& failure) {
     const auto failed = [&](const char* step, VkResult result) -> const char* {
-        if (entry.buffer) context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, entry.buffer, nullptr);
-        if (entry.memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, entry.memory, nullptr);
-        entry.buffer = VK_NULL_HANDLE;
-        entry.memory = VK_NULL_HANDLE;
+        if (entry.buffer) context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, std::exchange(entry.buffer, VK_NULL_HANDLE), nullptr);
+        if (entry.memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, std::exchange(entry.memory, VK_NULL_HANDLE), nullptr);
         failure = result;
         return step;
     };
@@ -373,14 +371,14 @@ std::shared_ptr<ImportChunk> importChunk(const Context& context, int file, std::
     allocation.allocationSize = ImportChunkBytes;
     allocation.memoryTypeIndex = static_cast<std::uint32_t>(std::countr_zero(types));
     auto chunk = std::make_shared<ImportChunk>();
+    chunk->device = context.device;
+    chunk->freeMemory = context.Function<PFN_vkFreeMemory>("vkFreeMemory");
     if (const auto result = context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &chunk->memory); result != VK_SUCCESS) {
         close(buffer);
         failure = result;
         step = "vkAllocateMemory";
         return nullptr;
     }
-    chunk->device = context.device;
-    chunk->freeMemory = context.Function<PFN_vkFreeMemory>("vkFreeMemory");
     chunk->memoryType = allocation.memoryTypeIndex;
     for (auto it = chunks.chunks.begin(); it != chunks.chunks.end();) it = it->second.expired() ? chunks.chunks.erase(it) : std::next(it);
     chunks.chunks[key] = chunk;
@@ -397,12 +395,15 @@ const char* createChunkedDmaBufImport(const Context& context, HostImport& entry,
     info.size = entry.bytes;
     info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    VkBuffer buffer = VK_NULL_HANDLE;
+    auto& buffer = entry.buffer;
     if (const auto result = context.Function<PFN_vkCreateBuffer>("vkCreateBuffer")(context.device, &info, nullptr, &buffer); result != VK_SUCCESS) {
         failure = result;
         return "vkCreateBuffer";
     }
-    const auto destroy = [&] { context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, buffer, nullptr); };
+    const auto destroy = [&] {
+        context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, std::exchange(buffer, VK_NULL_HANDLE), nullptr);
+        entry.chunk.reset();
+    };
     VkMemoryRequirements requirements{};
     context.Function<PFN_vkGetBufferMemoryRequirements>("vkGetBufferMemoryRequirements")(context.device, buffer, &requirements);
     if (requirements.alignment == 0 || within % requirements.alignment != 0 || within + requirements.size > ImportChunkBytes) {
@@ -421,16 +422,15 @@ const char* createChunkedDmaBufImport(const Context& context, HostImport& entry,
         fits = false;
         return nullptr;
     }
+    entry.chunk = chunk;
     if (const auto result = context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, chunk->memory, within); result != VK_SUCCESS) {
         destroy();
         failure = result;
         return "vkBindBufferMemory";
     }
     const VkBufferDeviceAddressInfo addressInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, buffer};
-    entry.buffer = buffer;
     entry.memory = VK_NULL_HANDLE;
     entry.address = context.Function<PFN_vkGetBufferDeviceAddressKHR>("vkGetBufferDeviceAddressKHR")(context.device, &addressInfo);
-    entry.chunk = std::move(chunk);
     entry.dmaBuf = true;
     return nullptr;
 }
@@ -523,7 +523,30 @@ bool sameRange(const HostImport& entry, const GuestAllocations::Lease& lease) {
     return current != nullptr && !entry.range.owner_before(current) && !current.owner_before(entry.range);
 }
 
+struct ImportConstruction {
+    ImportConstruction(const Context& context, std::uint64_t base, std::uint64_t bytes)
+        : device(context.device), destroyBuffer(context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")), freeMemory(context.Function<PFN_vkFreeMemory>("vkFreeMemory")), entry{base, bytes, VK_NULL_HANDLE, VK_NULL_HANDLE, 0} {}
+    ImportConstruction(const ImportConstruction&) = delete;
+    ImportConstruction& operator=(const ImportConstruction&) = delete;
+    ~ImportConstruction() {
+        if (!armed) return;
+        if (entry.buffer != VK_NULL_HANDLE) destroyBuffer(device, entry.buffer, nullptr);
+        if (entry.memory != VK_NULL_HANDLE) freeMemory(device, entry.memory, nullptr);
+#ifdef _WIN32
+        GuestArena::GuestArenaUnmapAlias_nid_postfix(entry.alias);
+#endif
+    }
+    VkDevice device;
+    PFN_vkDestroyBuffer destroyBuffer;
+    PFN_vkFreeMemory freeMemory;
+    HostImport entry;
+    bool armed = true;
+};
+
+void ensurePinWaiter();
+
 const HostImport* importAllocation(const Context& context, HostImports& state, std::uint64_t base, std::uint64_t bytes, const GuestAllocations::Lease& lease) {
+    ensurePinWaiter();
     if (const auto found = state.imports.find(base); found != state.imports.end()) {
         if (found->second.bytes == bytes && sameRange(found->second, lease)) return &found->second;
         retireImport(context.device, state, found, lease);
@@ -551,7 +574,8 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
         }
         return nullptr;
     }
-    HostImport entry{base, bytes, VK_NULL_HANDLE, VK_NULL_HANDLE, 0};
+    ImportConstruction owner(context, base, bytes);
+    auto& entry = owner.entry;
     entry.range = leasedRangeOwner(lease, base);
 #ifdef _WIN32
     // Drivers pin imported pages, so every page must be committed and accessible.
@@ -603,9 +627,6 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
 #endif
     if (entry.unwatched) GuestMemory::Unwatch(base, bytes);
     if (step != nullptr) {
-#ifdef _WIN32
-        GuestArena::GuestArenaUnmapAlias_nid_postfix(entry.alias);
-#endif
         state.failed.insert(base);
         std::fprintf(stderr, "[gpu] host import of 0x%llx+0x%llx failed at %s (%d); falling back to copies\n", static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), step, static_cast<int>(result));
 #ifdef _WIN32
@@ -638,7 +659,9 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
     std::uint64_t liveBytes = bytes;
     for (const auto& [address, existing] : state.imports) liveBytes += existing.bytes;
     if (trace) std::fprintf(stderr, "[gpu] host import of 0x%llx+0x%llx ok (%zu live, %.1f MiB live, %.1f MiB ever)\n", static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), state.imports.size() + 1, liveBytes / 1048576.0, importedBytes / 1048576.0);
-    return &state.imports.emplace(base, entry).first->second;
+    const auto inserted = state.imports.emplace(base, entry);
+    owner.armed = false;
+    return &inserted.first->second;
 }
 
 // The lease is in address order (it is built from the registry map), so a range is found by binary search.
@@ -1253,7 +1276,7 @@ SnapshotStats& Snapshots() {
     return stats;
 }
 
-bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept {
+bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) {
     const auto start = std::chrono::steady_clock::now();
     bool synced = false;
     bool drained = false;
@@ -1273,8 +1296,9 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
         state.stats.contentionMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         return true;
     }
+    if (Recorder::InCompletion()) throw std::runtime_error("guest allocation mutation cannot wait for an active GPU completion");
     if (GuestMemory::GpuMutex().HeldByThisThread()) {
-        try {
+        {
             auto* recorder = Recorder::Active();
             if (recorder != nullptr && !recorder->Idle()) {
                 Recorder::CountSync(4);
@@ -1284,8 +1308,8 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
             }
             const auto end = static_cast<std::uint64_t>(address) + bytes;
             auto& imports = Imports();
-            const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
             {
+                const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
                 std::lock_guard importsLock(imports.mutex);
                 for (auto it = imports.imports.begin(); it != imports.imports.end();) {
                     const auto base = it->first;
@@ -1305,11 +1329,10 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
                 synced = true;
                 drained = true;
             }
-        } catch (const std::exception& error) {
-            std::fprintf(stderr, "[gpu] lease wait failed: %s\n", error.what());
+            Recorder::ReleaseCompletedKeeps();
         }
     } else {
-        try {
+        {
             std::lock_guard lock(GuestMemory::GpuMutex());
             auto& state = Leases();
             auto* recorder = Recorder::Active();
@@ -1373,8 +1396,6 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
                     drained = true;
                 }
             }
-        } catch (const std::exception& error) {
-            std::fprintf(stderr, "[gpu] lease wait failed: %s\n", error.what());
         }
     }
     auto& state = Leases();
