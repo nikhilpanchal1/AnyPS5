@@ -69,7 +69,7 @@ std::array<std::uint32_t, 4> Descriptor(const void* data, std::uint32_t bytes) {
 
 std::vector<std::uint32_t> Code(bool coherent, bool waterfall) {
     std::vector<std::uint32_t> code{0x34020082u, 0x34040086u};
-    if (waterfall) code.insert(code.end(), {0x36060083u, 0xbea0047eu});
+    if (waterfall) code.insert(code.end(), {0x2c060084u, 0x36060683u, 0xbea0047eu});
     else code.push_back(0xbea80380u);
     const auto loop = code.size();
     if (waterfall) code.insert(code.end(), {0x7e200503u, 0x7d840610u, 0xbea2246au, 0x8f128410u, 0x8f298c10u});
@@ -105,8 +105,8 @@ struct Record {
 };
 
 std::array<Record, Records> RecordSet(std::uint32_t revision) {
-    if (revision == 0u) return {{{0x1000u, 512u}, {0x2001u, 265u}, {0x3003u, 128u}, {0u, 0u}}};
-    return {{{0x4002u, 257u}, {0x1003u, 512u}, {0u, 0u}, {0x3001u, 193u}}};
+    if (revision == 0u) return {{{0x1000u, 512u}, {0x2001u, 265u}, {0x3000u, 193u}, {0u, 0u}}};
+    return {{{0x4002u, 257u}, {0x1003u, 512u}, {0u, 0u}, {0x3001u, 257u}}};
 }
 
 std::vector<std::uint8_t> Initial(GuestBlock& guest, std::uint32_t revision) {
@@ -126,7 +126,7 @@ std::vector<std::uint8_t> Expected(const std::vector<std::uint8_t>& initial, std
     const auto records = RecordSet(revision);
     for (std::uint32_t record = 0u; record < Records; ++record) {
         for (std::uint32_t lane = 0u; lane < Threads; ++lane) {
-            if (waterfall && lane % Records != record) continue;
+            if (waterfall && (lane >> 4u) % Records != record) continue;
             for (std::uint32_t component = 0u; component < 10u; ++component) {
                 const auto offset = lane * 4u + component * 4u;
                 std::uint32_t value = 0u;
@@ -200,9 +200,10 @@ int main(int argc, char** argv) {
         if (!device) return VulkanTestSkipped;
         GuestBlock guest;
         const auto native = device->Target();
-        const auto split = device->ComputeTarget(32u);
-        if (splitMode && split.subgroupSize == native.subgroupSize) {
-            std::puts("skipped, device has no distinct 32-lane subgroup target");
+        auto split = device->ComputeTarget(32u);
+        split.spannedWaves = false;
+        if (splitMode && split.subgroupSize != 32u) {
+            std::puts("skipped, device has no 32-lane subgroup target");
             return VulkanTestSkipped;
         }
         Require(!splitMode || waveSize == 64u, "split target requires a wave64 test");

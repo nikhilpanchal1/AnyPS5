@@ -262,7 +262,7 @@ void RunBdaRuntimeBufferExecutionTests(const Context& context) {
             std::fprintf(stderr, "runtime buffer anchors: %s %s%s pipeline\n", gcn ? "GCN" : "RDNA", scalar ? "scalar" : "vector", coherent ? " glc" : "");
             const auto shader = MakeBdaRuntimeBufferReadTestShader(coherent, gcn, scalar);
             Pipeline pipeline(context, shader, {&table, &fault, &output});
-            for (std::uint32_t test = 0u; test < 12u; ++test) {
+            for (std::uint32_t test = 0u; test < 13u; ++test) {
                 if (test == 8u && !gcn) continue;
                 auto mapped = ranges;
                 if (test == 5u) mapped[2].permissions = 0u;
@@ -304,6 +304,7 @@ void RunBdaRuntimeBufferExecutionTests(const Context& context) {
                     if (test == 9u) valid = false;
                     if (test == 10u) base = 0u;
                     if (test == 11u) offset = 60u;
+                    if (test == 12u) offset = lane % 2u != 0u ? 61u : 0u;
                     const auto slot = BdaRuntimeBufferInputWord + lane * 6u;
                     expected[slot] = static_cast<std::uint32_t>(base);
                     expected[slot + 1u] = static_cast<std::uint32_t>(base >> 32u);
