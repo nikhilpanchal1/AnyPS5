@@ -918,26 +918,29 @@ bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, 
             AddMapping(address, len, phys, nativeProtection);
         } else {
             FlexibleMappingPatch flexible(address, address + len);
+            const auto commitOrigin = [&] {
+                flexible.Commit();
+                if (onMappedLocked) onMappedLocked();
+            };
             EraseMappings(address, address + len);
 #ifdef _WIN32
             if (zero) {
                 GuestArena::GuestArenaMapZero_nid_postfix(addr, len);
-                flexible.Commit();
+                commitOrigin();
             }
             else {
                 GuestArena::GuestArenaReset_nid_postfix(addr, len);
-                flexible.Commit();
+                commitOrigin();
                 if (nativeProtection != PROT_NONE) CommitArenaRange(addr, len, WinProtFromPosix(nativeProtection));
             }
 #elif defined(__EMSCRIPTEN__)
             GuestArena::GuestArenaReset_nid_postfix(addr, len);
-            flexible.Commit();
+            commitOrigin();
             GuestArena::GuestArenaCommit_nid_postfix(addr, len, 0x04, PS5_PAGE_SIZE);
 #else
             if (::mmap(addr, len, nativeProtection, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "remap anonymous memory");
-            flexible.Commit();
+            commitOrigin();
 #endif
-            if (onMappedLocked) onMappedLocked();
 #if defined(__linux__) || defined(__APPLE__)
             GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(addr, len);
 #endif

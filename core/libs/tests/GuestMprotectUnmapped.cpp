@@ -111,6 +111,11 @@ public:
         return physical;
     }
 
+    void Alias(std::size_t index, std::int64_t physical) const {
+        void* address = At(index);
+        Require(sceKernelMapDirectMemory(&address, Page, 3, 0x10, physical, 0) == 0 && address == At(index), "map fixed direct alias failed");
+    }
+
     void Flexible(std::size_t index, std::size_t count = 1, int kind = 0) {
         void* address = At(index);
         int result;
@@ -157,10 +162,31 @@ void CheckPhysical(std::int64_t physical, int expected) {
     Require(type == expected, "physical allocation type changed unexpectedly");
 }
 
+void CheckRefusalContents(const Layout& layout, std::size_t directIndex, std::size_t flexibleIndex, std::size_t aliasIndex) {
+    volatile unsigned char* direct = layout.At(directIndex);
+    volatile unsigned char* flexible = layout.At(flexibleIndex);
+    volatile unsigned char* alias = layout.At(aliasIndex);
+    for (const auto offset : {std::size_t{0}, Page - 1}) {
+        Require(direct[offset] == 41 && flexible[offset] == 77 && alias[offset] == 41, "refusal changed mapped contents or direct alias backing");
+        direct[offset] = 42;
+        Require(alias[offset] == 42, "direct write no longer reaches its alias");
+        alias[offset] = 43;
+        flexible[offset] = 78;
+        Require(direct[offset] == 43 && flexible[offset] == 78, "refused memory lost native read/write access or alias identity");
+        alias[offset] = 41;
+        flexible[offset] = 77;
+    }
+}
+
 void MixedRangeRefusal() {
-    Layout layout(2);
+    Layout layout(3);
     const auto physical = layout.Direct(0);
     layout.Flexible(1);
+    layout.Alias(2, physical);
+    for (const auto offset : {std::size_t{0}, Page - 1}) {
+        layout.At(0)[offset] = 41;
+        layout.At(1)[offset] = 77;
+    }
     layout.Check(0, true, 3);
     layout.Check(1, false, 3);
     for (int type : {3, 0, -1, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}) {
@@ -168,19 +194,28 @@ void MixedRangeRefusal() {
             layout.Reject(0, 2, type, protection);
             layout.Check(0, true, 3);
             layout.Check(1, false, 3);
+            layout.Check(2, true, 3);
             CheckPhysical(physical, 0);
+            CheckRefusalContents(layout, 0, 1, 2);
         }
     }
 }
 
 void FlexibleFirst() {
-    Layout layout(2);
+    Layout layout(3);
     layout.Flexible(0);
     const auto physical = layout.Direct(1);
+    layout.Alias(2, physical);
+    for (const auto offset : {std::size_t{0}, Page - 1}) {
+        layout.At(1)[offset] = 41;
+        layout.At(0)[offset] = 77;
+    }
     layout.Reject(0, 2);
     layout.Check(0, false, 3);
     layout.Check(1, true, 3);
+    layout.Check(2, true, 3);
     CheckPhysical(physical, 0);
+    CheckRefusalContents(layout, 1, 0, 2);
 }
 
 void FlexibleMaps() {
