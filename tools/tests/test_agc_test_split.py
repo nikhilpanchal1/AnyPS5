@@ -295,6 +295,254 @@ def kernel_original(blocks=(KERNEL_ALPHA, KERNEL_BETA), library="Export.cpp", pr
 
 
 class KernelSplitTests(unittest.TestCase):
+    def test_computed_variable_reads_require_manual_migration_in_helpers_too(self):
+        for source in ("${${selector}}", "${source_${selector}}", "$ENV{${selector}}", "$CACHE{${selector}}"):
+            for helper in (False, True):
+                with self.subTest(source=source, helper=helper):
+                    prefix = ("set(selector shared_source)\n"
+                              "set(shared_source Zeta.cpp)\n")
+                    if helper:
+                        prefix = ("function(add_kernel_case target)\n"
+                                  "add_executable(${target} " + source + ")\n"
+                                  "endfunction()\n" + prefix)
+                        zeta = "add_kernel_case(kernel_zeta_tests)\n"
+                        alpha = "add_kernel_case(kernel_alpha_tests)\n"
+                    else:
+                        zeta = "add_test_executable(kernel_zeta_tests " + source + ")\n"
+                        alpha = "add_test_executable(kernel_alpha_tests " + source + ")\n"
+                    text = prefix + "if(BUILD_TESTING)\n" + zeta + "set(shared_source Alpha.cpp)\n" + alpha + "endif()\n"
+                    with self.assertRaisesRegex(agc_test_split.SplitError, "computed variable reference"):
+                        agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_list_context_is_rejected_in_direct_registrations_and_shared_helpers(self):
+        for variable in ("CMAKE_CURRENT_LIST_DIR", "CMAKE_CURRENT_LIST_FILE", "CMAKE_CURRENT_LIST_LINE", "CMAKE_PARENT_LIST_FILE"):
+            for helper in (False, True):
+                with self.subTest(variable=variable, helper=helper):
+                    source = "${" + variable + "}/Alpha.cpp"
+                    if helper:
+                        text = ("function(add_kernel_case target)\n"
+                                "    add_executable(${target} " + source + ")\n"
+                                "endfunction()\n"
+                                "if(BUILD_TESTING)\n"
+                                "    add_kernel_case(kernel_alpha_tests)\n"
+                                "    add_test(NAME kernel_alpha COMMAND kernel_alpha_tests)\n"
+                                "endif()\n")
+                    else:
+                        text = kernel_original((KERNEL_ALPHA.replace("tests/Alpha.cpp", source),))
+                    with self.assertRaisesRegex(agc_test_split.SplitError, "list context"):
+                        agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_target_and_local_variable_conditions_cannot_be_reordered(self):
+        zeta = KERNEL_BETA.replace("beta", "zeta")
+        for condition, before, after in (("TARGET kernel_zeta_tests", "", ""),
+                                          ("wantAlpha", "set(wantAlpha TRUE)\n", "set(wantAlpha FALSE)\n")):
+            with self.subTest(condition=condition):
+                text = ("if(BUILD_TESTING)\n" + before + zeta + "if(" + condition + ")\n" + KERNEL_ALPHA +
+                        "endif()\n" + after + "endif()\n")
+                with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+                    agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_source_binding_overwrite_cannot_be_reordered(self):
+        text = ("if(BUILD_TESTING)\n"
+                "set(shared_source Zeta.cpp)\n"
+                "add_test_executable(kernel_zeta_tests ${shared_source})\n"
+                "set(shared_source Alpha.cpp)\n"
+                "add_test_executable(kernel_alpha_tests ${shared_source})\n"
+                "endif()\n")
+        with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+            agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_target_property_source_binding_cannot_be_reordered(self):
+        for getter in ("get_target_property(zeta_sources kernel_zeta_tests SOURCES)",
+                       "get_property(zeta_sources TARGET kernel_zeta_tests PROPERTY SOURCES)"):
+            with self.subTest(getter=getter):
+                text = ("if(BUILD_TESTING)\n"
+                        "add_test_executable(kernel_zeta_tests Zeta.cpp)\n" + getter + "\n"
+                        "add_test_executable(kernel_alpha_tests ${zeta_sources})\n"
+                        "endif()\n")
+                with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+                    agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_directory_variable_queries_cannot_be_hoisted_across_a_write(self):
+        text = ("if(BUILD_TESTING)\n"
+                "set(shared_source Zeta.cpp)\n"
+                "add_test_executable(kernel_zeta_tests Zeta.cpp)\n"
+                "get_directory_property(alpha_sources DEFINITION shared_source)\n"
+                "add_test_executable(kernel_alpha_tests ${alpha_sources})\n"
+                "set(shared_source Alpha.cpp)\n"
+                "endif()\n")
+        with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+            agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_string_output_bindings_cannot_be_reordered(self):
+        for operation in ("CONCAT shared_source {source}",
+                          "REPLACE unused ignored shared_source {source}",
+                          "TOLOWER {source} shared_source",
+                          "REGEX REPLACE unused ignored shared_source {source}"):
+            with self.subTest(operation=operation):
+                text = ("if(BUILD_TESTING)\n"
+                        "string(" + operation.format(source="Zeta.cpp") + ")\n"
+                        "add_test_executable(kernel_zeta_tests ${shared_source})\n"
+                        "string(" + operation.format(source="Alpha.cpp") + ")\n"
+                        "add_test_executable(kernel_alpha_tests ${shared_source})\n"
+                        "endif()\n")
+                with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+                    agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_list_mutations_cannot_be_hoisted_before_a_reader(self):
+        text = ("if(BUILD_TESTING)\n"
+                "list(APPEND shared_source Zeta.cpp)\n"
+                "add_test_executable(kernel_zeta_tests ${shared_source})\n"
+                "list(POP_BACK shared_source)\n"
+                "list(APPEND shared_source Alpha.cpp)\n"
+                "add_test_executable(kernel_alpha_tests ${shared_source})\n"
+                "endif()\n")
+        with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+            agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_list_and_file_output_bindings_cannot_be_reordered(self):
+        for before, after, prefix in (("list(GET sources 0 shared_source)", "list(GET sources 1 shared_source)",
+                                       "set(sources Zeta.cpp Alpha.cpp)\n"),
+                                      ("file(READ Zeta.txt shared_source)", "file(READ Alpha.txt shared_source)", "")):
+            with self.subTest(before=before):
+                text = ("if(BUILD_TESTING)\n" + prefix + before + "\n"
+                        "add_test_executable(kernel_zeta_tests ${shared_source})\n" + after + "\n"
+                        "add_test_executable(kernel_alpha_tests ${shared_source})\n"
+                        "endif()\n")
+                with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+                    agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_property_keywords_are_not_variable_writes(self):
+        text = ("if(BUILD_TESTING)\n"
+                "set(SOURCES original_value)\n"
+                "add_test_executable(kernel_zeta_tests Zeta.cpp)\n"
+                "get_target_property(zeta_sources kernel_zeta_tests SOURCES)\n"
+                "add_test_executable(kernel_alpha_tests Alpha.cpp)\n"
+                "target_compile_definitions(kernel_alpha_tests PRIVATE ${SOURCES})\n"
+                "endif()\n")
+        lists, fragments = agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+        self.assertEqual(sorted(fragments), ["kernel_alpha_tests", "kernel_zeta_tests"])
+        self.assertIn("set(SOURCES original_value)", lists)
+        self.assertIn("get_target_property(zeta_sources kernel_zeta_tests SOURCES)", fragments["kernel_zeta_tests"])
+        self.assertIn("PRIVATE ${SOURCES}", fragments["kernel_alpha_tests"])
+
+    def test_compound_target_and_test_conditions_cannot_be_reordered(self):
+        zeta = KERNEL_BETA.replace("beta", "zeta")
+        for condition in ("TARGET kernel_zeta_tests", "TEST kernel_zeta"):
+            for branch in ("if(" + condition + ")\n", "if(FALSE)\nmessage(STATUS unused)\nelseif(" + condition + ")\n"):
+                with self.subTest(condition=condition, branch=branch):
+                    text = ("if(BUILD_TESTING)\n" + zeta + branch + KERNEL_ALPHA +
+                            "else()\nmessage(STATUS absent)\nendif()\nendif()\n")
+                    with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+                        agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_macro_parent_scope_and_cache_effects_require_manual_migration(self):
+        setters = ("macro(remember_source value)\nset(shared_source ${value})\nendmacro()\n",
+                   "function(remember_source value)\nset(shared_source ${value} PARENT_SCOPE)\nendfunction()\n",
+                   "set(shared_source Zeta.cpp CACHE STRING source)\n",
+                   "unset(shared_source CACHE)\n",
+                   "get_filename_component(shared_source Zeta.cpp ABSOLUTE CACHE)\n")
+        for setter in setters:
+            with self.subTest(setter=setter):
+                with self.assertRaisesRegex(agc_test_split.SplitError, "effects require a manual migration"):
+                    agc_test_split.migrated(kernel_original(prefix=setter), spec=agc_test_split.KERNEL_SPEC)
+
+    def test_unsupported_variable_writer_forms_require_manual_migration(self):
+        for command in ("string(CONFIGURE @source@ configured_source)",
+                        "list(TRANSFORM sources TOUPPER OUTPUT_VARIABLE upper_sources)",
+                        "file(GET_RUNTIME_DEPENDENCIES RESOLVED_DEPENDENCIES_VAR dependencies)",
+                        "cmake_path(GET source FILENAME filename)"):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(agc_test_split.SplitError, "unsupported .* effects require a manual migration"):
+                    agc_test_split.migrated(kernel_original(prefix=command + "\n"), spec=agc_test_split.KERNEL_SPEC)
+
+    def test_opaque_variable_effects_require_manual_migration_in_helpers_too(self):
+        for command in ("include(extra.cmake)", "add_subdirectory(extra)", "cmake_language(EVAL CODE extra)",
+                        "foreach(source IN ZIP_LISTS alpha beta)\nendforeach()", "block(PROPAGATE source)\nendblock()",
+                        "return(PROPAGATE source)"):
+            for helper in (False, True):
+                with self.subTest(command=command, helper=helper):
+                    prefix = "function(register_cases)\n" + command + "\nendfunction()\n" if helper else command + "\n"
+                    with self.assertRaisesRegex(agc_test_split.SplitError, "unsupported .* effects require a manual migration"):
+                        agc_test_split.migrated(kernel_original(prefix=prefix), spec=agc_test_split.KERNEL_SPEC)
+
+    def test_match_condition_captures_cannot_be_reordered(self):
+        text = ("if(BUILD_TESTING)\n"
+                "if(Zeta.cpp MATCHES \"(.*)\")\n"
+                "add_test_executable(kernel_zeta_tests Zeta.cpp)\n"
+                "endif()\n"
+                "add_test_executable(kernel_alpha_tests ${CMAKE_MATCH_1})\n"
+                "endif()\n")
+        with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+            agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_local_helpers_cannot_read_reordered_caller_bindings(self):
+        for transitive in (False, True):
+            with self.subTest(transitive=transitive):
+                helper = ("function(add_kernel_case target)\n" +
+                          ("add_kernel_target(${target})\nendfunction()\nfunction(add_kernel_target target)\n" if transitive else "") +
+                          "add_executable(${target} ${shared_source})\nendfunction()\n")
+                text = (helper + "if(BUILD_TESTING)\n"
+                        "set(shared_source Zeta.cpp)\n"
+                        "add_kernel_case(kernel_zeta_tests)\n"
+                        "set(shared_source Alpha.cpp)\n"
+                        "add_kernel_case(kernel_alpha_tests)\n"
+                        "endif()\n")
+                with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+                    agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_cmake_target_initializers_cannot_be_reordered(self):
+        text = ("if(BUILD_TESTING)\n"
+                "set(CMAKE_CXX_STANDARD 20)\n"
+                "add_test_executable(kernel_zeta_tests Zeta.cpp)\n"
+                "set(CMAKE_CXX_STANDARD 23)\n"
+                "add_test_executable(kernel_alpha_tests Alpha.cpp)\n"
+                "endif()\n")
+        with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+            agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_repository_helper_parameters_cannot_be_reordered_through_local_wrappers(self):
+        cases = (("add_test_executable", "ANYPS5_TEST_OUTPUT_DIRECTORY", "zeta", "alpha"),
+                 ("add_test_executable", "MINGW", "OFF", "ON"),
+                 ("configure_host_test_executable", "MINGW", "OFF", "ON"),
+                 ("add_asan_test_options", "ANYPS5_ENABLE_ASAN", "OFF", "ON"),
+                 ("configure_windows_unwind", "MINGW", "OFF", "ON"),
+                 ("configure_windows_unwind", "CMAKE_OBJCOPY", "zeta-objcopy", "alpha-objcopy"),
+                 ("configure_macos_unwind", "APPLE", "OFF", "ON"))
+        for helper, variable, before, after in cases:
+            for wrapped in (False, True):
+                with self.subTest(helper=helper, variable=variable, wrapped=wrapped):
+                    def registration(target, source):
+                        if helper == "add_test_executable":
+                            return f"add_test_executable({target} {source})\n"
+                        defined = f"add_executable({target} {source})\n"
+                        if helper == "add_asan_test_options":
+                            return defined + f"add_test(NAME {target} COMMAND {target})\nadd_asan_test_options({target} verify_asan_link_order=0)\n"
+                        return defined + f"{helper}({target})\n"
+
+                    prefix = ""
+                    zeta = registration("kernel_zeta_tests", "Zeta.cpp")
+                    alpha = registration("kernel_alpha_tests", "Alpha.cpp")
+                    if wrapped:
+                        prefix = ("function(register_case target source)\n" + registration("${target}", "${source}") +
+                                  "endfunction()\nfunction(delegate_case target source)\n"
+                                  "register_case(${target} ${source})\nendfunction()\n")
+                        zeta = "delegate_case(kernel_zeta_tests Zeta.cpp)\n"
+                        alpha = "delegate_case(kernel_alpha_tests Alpha.cpp)\n"
+                    text = (prefix + "if(BUILD_TESTING)\n" + f"set({variable} {before})\n" + zeta +
+                            f"set({variable} {after})\n" + alpha + "endif()\n")
+                    with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+                        agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_directory_and_global_state_changes_require_manual_migration(self):
+        for command in ("include_directories(include)", "link_directories(libs)", "link_libraries(extra)",
+                        "add_definitions(-DADDED)", "remove_definitions(-DREMOVED)", "add_compile_options(-O2)",
+                        "add_link_options(-static)", "set_directory_properties(PROPERTIES COMPILE_OPTIONS -O2)",
+                        "set_property(DIRECTORY PROPERTY COMPILE_OPTIONS -O2)", "set_property(GLOBAL PROPERTY EXAMPLE value)"):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(agc_test_split.SplitError, "unsupported .* effects require a manual migration"):
+                    agc_test_split.migrated(kernel_original(prefix=command + "\n"), spec=agc_test_split.KERNEL_SPEC)
+
     def test_library_specs_are_immutable_and_do_not_change_each_other(self):
         agc_before = agc_test_split.migrated(original(), EXECUTION)
         spec = agc_test_split.KERNEL_SPEC
@@ -489,6 +737,38 @@ class KernelResolveTests(unittest.TestCase):
         self.assertIn("already includes", result.stderr)
         self.assertEqual(self.read(self.spec.lists), split)
         self.assertEqual(self.read(LISTS), original())
+
+    def check_unsafe_change_is_refused(self, change, diagnostic):
+        self.prepare_branches(change)
+        self.git("checkout", "-q", "change")
+        self.assertNotEqual(self.git("rebase", "main", check=False).returncode, 0)
+        before = {str(path.relative_to(self.root)): path.read_bytes() for path in self.root.rglob("*")
+                  if path.is_file() and path.relative_to(self.root).parts[0] != ".git"}
+        index = self.git("ls-files", "--stage", "-z").stdout
+        result = self.tool("resolve")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(diagnostic, result.stderr)
+        self.assertEqual(self.git("ls-files", "--stage", "-z").stdout, index)
+        after = {str(path.relative_to(self.root)): path.read_bytes() for path in self.root.rglob("*")
+                 if path.is_file() and path.relative_to(self.root).parts[0] != ".git"}
+        self.assertEqual(after, before)
+
+    def test_resolve_refuses_changed_list_context_without_writes(self):
+        change = kernel_original((KERNEL_ALPHA, KERNEL_BETA, MTYPEPROTECT.replace("${LIBS_INCLUDE_DIR}", "${CMAKE_CURRENT_LIST_DIR}")))
+        self.check_unsafe_change_is_refused(change, "list context")
+
+    def test_resolve_refuses_changed_condition_order_without_writes(self):
+        dependent = "if(TARGET kernel_zeta_tests)\n" + MTYPEPROTECT + "endif()\n"
+        change = kernel_original((KERNEL_ALPHA, KERNEL_BETA, KERNEL_BETA.replace("beta", "zeta"), dependent))
+        self.check_unsafe_change_is_refused(change, "order")
+
+    def test_resolve_refuses_computed_variable_reads_without_writes(self):
+        computed = ("add_test_executable(kernel_zeta_tests ${${selector}})\n"
+                    "set(shared_source Alpha.cpp)\n"
+                    "add_test_executable(kernel_gamma_tests ${${selector}})\n")
+        change = kernel_original((KERNEL_ALPHA, KERNEL_BETA, computed),
+                                 prefix="set(selector shared_source)\nset(shared_source Zeta.cpp)\n")
+        self.check_unsafe_change_is_refused(change, "computed variable reference")
 
 
 if __name__ == "__main__":

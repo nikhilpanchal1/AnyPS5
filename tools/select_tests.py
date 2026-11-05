@@ -15,6 +15,7 @@ REGISTRATION_SPEC.loader.exec_module(REGISTRATION)
 FULL = re.compile(r"^CMakeLists\.txt$|^core/CMakeLists\.txt$|^core/libs/CMakeLists\.txt$|^\.github/workflows/build\.yml$"
                   r"|^3rdparty/|^cmake/|^\.gitmodules$|^tools/select_tests\.py$")
 LOCAL = re.compile(r"(^|/)CMakeLists\.txt$|\.cmake$")
+REGISTRATION_FRAGMENT = re.compile(r"(^|/)tests/cmake/[^/]+\.cmake$")
 BATCH = 20000
 
 
@@ -221,6 +222,18 @@ def load_graph(path):
     return graph
 
 
+def registrations(build, listing):
+    graph = listing["backtraceGraph"]
+    registered = {}
+    for test in listing["tests"]:
+        files, node = set(), test.get("backtrace")
+        while node is not None:
+            files.add(build.repo(graph["files"][graph["nodes"][node]["file"]]))
+            node = graph["nodes"][node].get("parent")
+        registered[test["name"]] = files - {None}
+    return registered
+
+
 def dump(build, out):
     deps = collections.defaultdict(set)
     current = None
@@ -233,7 +246,7 @@ def dump(build, out):
             if path:
                 deps[current].add(path)
     listing, listed = build.tests()
-    graph = listing["backtraceGraph"]
+    registered = registrations(build, listing)
     arguments = {test["name"]: {build.output(path) for path in paths((test.get("command") or [])[1:])} - {None}
                  for test in listed}
     outputs = set(build.outputs(sorted(set().union(*arguments.values()))))
@@ -255,14 +268,10 @@ def dump(build, out):
         closures[target] = sorted(files)
     tests = {}
     for test in listed:
-        registered, node = set(), test.get("backtrace")
-        while node is not None:
-            registered.add(build.repo(graph["files"][graph["nodes"][node]["file"]]))
-            node = graph["nodes"][node].get("parent")
         props = {p["name"]: p["value"] for p in test.get("properties", [])}
         inputs = {build.repo(a) for a in paths((test.get("command") or [])[1:])} - {None}
         inputs.update(path for target in arguments[test["name"]] & outputs for path in closures[target])
-        tests[test["name"]] = {"registered": sorted(registered - {None}), "arguments": sorted(inputs),
+        tests[test["name"]] = {"registered": sorted(registered[test["name"]]), "arguments": sorted(inputs),
                                "requires": props.get("FIXTURES_REQUIRED", []), "sets": props.get("FIXTURES_SETUP", []),
                                "depends": props.get("DEPENDS", []), "target": build.target(test)}
     with open(out, "w", encoding="utf-8") as file:
@@ -276,6 +285,10 @@ def select(graph, changed, reasons=None):
         return None, full
     tests, closures = graph["tests"], {t: set(f) for t, f in graph["closures"].items()}
     known = set().union(*closures.values(), *(t["arguments"] for t in tests.values()))
+    registered = set().union(*(t["registered"] for t in tests.values()))
+    unknown_fragments = [f for f in changed if REGISTRATION_FRAGMENT.search(f) and f not in registered]
+    if unknown_fragments:
+        return None, unknown_fragments
     files = set(changed)
     dirs = tuple(f.rpartition("/")[0] + "/" for f in changed if "/" in f and (LOCAL.search(f) or f not in known))
     picked = set()
@@ -392,6 +405,15 @@ def main(argv=None):
     if picked is None:
         print(f"full run: {', '.join(full[:5])}")
         return 0
+    fragments = [path for path in changed if REGISTRATION_FRAGMENT.search(path)]
+    if fragments:
+        current = registrations(build, build.tests()[0])
+        moved = [path for path in fragments
+                 if {name for name, files in current.items() if path in files}
+                 != {name for name, test in graph["tests"].items() if path in test["registered"]}]
+        if moved:
+            print(f"full run: changed registrations in {', '.join(moved[:5])}")
+            return 0
     run, targets, total = plan(build, graph, picked)
     Path(build.path, "select.ninja").write_text("include build.ninja\nbuild selected: phony "
                                                 + " ".join(escape(t) for t in targets) + "\n", encoding=build.encoding)

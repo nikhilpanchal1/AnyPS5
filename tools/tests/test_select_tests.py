@@ -116,6 +116,112 @@ class SelectTests(SelectFixture):
                 self.assertIsNone(selected)
                 self.assertIn(changed, output)
 
+
+class FragmentSelectionTests(unittest.TestCase):
+    fragment = "alpha/tests/cmake/alpha_tests.cmake"
+
+    def graph(self, registered=None):
+        registrations = registered or {"alpha": "alpha/CMakeLists.txt", "other": "other/CMakeLists.txt"}
+        return {"tests": {name: {"target": name, "registered": [path], "arguments": [],
+                                 "sets": [], "requires": [], "depends": []}
+                          for name, path in registrations.items()},
+                "closures": {name: [f"src/{name}.c"] for name in registrations}}
+
+    def test_fragment_missing_from_an_older_graph_requires_a_full_run(self):
+        self.assertEqual(select_tests.select(self.graph(), [self.fragment]), (None, [self.fragment]))
+
+    def test_new_fragment_requires_a_full_run_with_existing_or_empty_registrations(self):
+        for graph in (self.graph({"alpha": "alpha/tests/cmake/sibling_tests.cmake"}),
+                      {"tests": {}, "closures": {}}):
+            with self.subTest(graph=graph):
+                self.assertEqual(select_tests.select(graph, [self.fragment]), (None, [self.fragment]))
+
+    def test_known_fragment_keeps_the_existing_directory_selection(self):
+        graph = self.graph({"alpha": self.fragment, "sibling": "alpha/tests/cmake/sibling_tests.cmake",
+                            "other": "other/CMakeLists.txt"})
+        self.assertEqual(select_tests.select(graph, [self.fragment]), ({"alpha", "sibling"}, []))
+
+    def test_fragment_recorded_only_as_an_input_requires_a_full_run(self):
+        for field in ("closures", "arguments"):
+            with self.subTest(field=field):
+                graph = self.graph()
+                if field == "closures":
+                    graph["closures"]["alpha"].append(self.fragment)
+                else:
+                    graph["tests"]["alpha"]["arguments"].append(self.fragment)
+                self.assertEqual(select_tests.select(graph, [self.fragment]), (None, [self.fragment]))
+
+    def test_unrelated_paths_keep_the_existing_selection(self):
+        for path, expected in (("README.md", set()), ("docs/example.cmake", set()),
+                               ("alpha/helper.cmake", {"alpha"}), ("unrelated/main.c", set())):
+            with self.subTest(path=path):
+                self.assertEqual(select_tests.select(self.graph(), [path]), (expected, []))
+
+
+class SelectFragmentTests(SelectFixture):
+    def test_existing_fragment_with_moved_registrations_requires_a_full_run(self):
+        cmake = self.source / "alpha/CMakeLists.txt"
+        original = cmake.read_text(encoding="utf-8")
+        fragment = self.source / "alpha/tests/cmake/alpha_tests.cmake"
+        fragment.parent.mkdir(parents=True, exist_ok=True)
+        target = "add_executable(alpha_tests main.c)\n"
+        alpha = "add_test(NAME alpha COMMAND alpha_tests)\n"
+        include = "include(${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/alpha_tests.cmake)\n"
+        data = original.removeprefix(target + alpha)
+        try:
+            fragment.write_text(data, encoding="utf-8")
+            cmake.write_text(target + alpha + include, encoding="utf-8")
+            subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build)], check=True, capture_output=True)
+            old = self.build / "partial-fragment-graph.json"
+            self.tool("dump", self.build, old)
+            fragment.write_text(alpha + data, encoding="utf-8")
+            cmake.write_text(target + include, encoding="utf-8")
+            subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build)], check=True, capture_output=True)
+            output, selected = self.select("alpha/tests/cmake/alpha_tests.cmake", graph=old)
+            self.assertIsNone(selected)
+            self.assertIn("changed registrations", output)
+            fresh = self.build / "current-fragment-graph.json"
+            self.tool("dump", self.build, fresh)
+            self.assertEqual(self.select("alpha/tests/cmake/alpha_tests.cmake", graph=fresh)[1],
+                             {"alpha", "alpha_data", "script"})
+        finally:
+            cmake.write_text(original, encoding="utf-8")
+            fragment.unlink(missing_ok=True)
+            subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build)], check=True, capture_output=True)
+
+    def test_moved_registrations_keep_unchanged_tests_with_an_older_graph(self):
+        cmake = self.source / "alpha/CMakeLists.txt"
+        original = cmake.read_text(encoding="utf-8")
+        fragment = self.source / "alpha/tests/cmake/alpha_tests.cmake"
+        fragment.parent.mkdir(parents=True, exist_ok=True)
+        target = "add_executable(alpha_tests main.c)\n"
+        try:
+            fragment.write_text(original.removeprefix(target), encoding="utf-8")
+            cmake.write_text(target + "include(${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/alpha_tests.cmake)\n", encoding="utf-8")
+            subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build)], check=True, capture_output=True)
+            self.select("beta/main.c")
+            self.assertTrue((self.build / "select.tests").is_file())
+            output, selected = self.select("alpha/tests/cmake/alpha_tests.cmake")
+            self.assertIsNone(selected)
+            self.assertIn("alpha/tests/cmake/alpha_tests.cmake", output)
+            run = self.tool("ctest", self.build, "--output-on-failure")
+            self.assertEqual(set(re.findall(r"Test +#\d+: (\S+)", run)),
+                             {"alpha", "alpha_data", "beta", "beta_setup", "script"})
+            fresh = self.build / "fragment-graph.json"
+            self.tool("dump", self.build, fresh)
+            self.assertEqual(self.select("alpha/tests/cmake/alpha_tests.cmake", graph=fresh)[1],
+                             {"alpha", "alpha_data", "script"})
+        finally:
+            cmake.write_text(original, encoding="utf-8")
+            fragment.unlink(missing_ok=True)
+            subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build)], check=True, capture_output=True)
+
+    def test_missing_graph_keeps_a_fragment_change_on_the_full_run(self):
+        output, selected = self.select("alpha/tests/cmake/new_tests.cmake", graph=self.build / "missing.json")
+        self.assertIsNone(selected)
+        self.assertIn("no test graph", output)
+
+
 class SelectGraphStateTests(SelectFixture):
     def test_changed_list_with_a_byte_order_mark_and_crlf_keeps_its_first_path(self):
         listed = self.build / "changed bom.txt"

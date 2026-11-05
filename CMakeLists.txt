@@ -391,6 +391,15 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_debt_split.py)
         add_test(NAME agc_test_split COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_agc_test_split.py)
+        set(libkernel_split_safety_source "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_libkernel_test_split_safety.py")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${libkernel_split_safety_source}")
+        file(STRINGS "${libkernel_split_safety_source}" libkernel_split_safety_cases REGEX "^    def test_[A-Za-z0-9_]+\\(")
+        foreach(test_case IN LISTS libkernel_split_safety_cases)
+            string(REGEX REPLACE "^    def (test_[A-Za-z0-9_]+).*" "\\1" test_case "${test_case}")
+            add_test(NAME libkernel_test_split_safety_${test_case} COMMAND ${Python3_EXECUTABLE}
+                "${libkernel_split_safety_source}" ResolveSafetyTests.${test_case})
+            set_tests_properties(libkernel_test_split_safety_${test_case} PROPERTIES TIMEOUT 20)
+        endforeach()
         add_test(NAME stubgen_stdout_newlines COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_stubgen_stdout_newlines.py)
         add_test(NAME hardware_oracle COMMAND ${Python3_EXECUTABLE}

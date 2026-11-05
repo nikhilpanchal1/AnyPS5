@@ -25,6 +25,7 @@ class SplitSpec:
     variable: str = "agcTest"
     execution: Optional[str] = EXECUTION
     custom_target_commands: bool = False
+    strict: bool = False
 
     @property
     def lists(self):
@@ -46,7 +47,7 @@ class SplitSpec:
 
 
 AGC_SPEC = SplitSpec()
-KERNEL_SPEC = SplitSpec("libkernel", "kernelTest", None, True)
+KERNEL_SPEC = SplitSpec("libkernel", "kernelTest", None, True, True)
 
 OPEN = {"if": "endif", "foreach": "endforeach", "while": "endwhile", "function": "endfunction", "macro": "endmacro", "block": "endblock"}
 BRANCH = {"elseif", "else"}
@@ -74,6 +75,17 @@ HELPERS = {
     "agc_add_spirv_mode_tests": lambda target: (target, [target[:-6], target[:-6] + "_full", target[:-6] + "_none"]),
 }
 TEST_KEYWORDS = {"CONFIGURATIONS", "WORKING_DIRECTORY", "COMMAND_EXPAND_LISTS"}
+STRICT_OPAQUE = {"cmake_path", "execute_process", "find_file", "find_library", "find_path", "find_program", "load_cache",
+                 "include", "add_subdirectory", "cmake_language", "include_directories", "link_directories", "link_libraries",
+                 "add_definitions", "remove_definitions", "add_compile_options", "add_link_options", "set_directory_properties",
+                 "set_source_files_properties", "cmake_policy"}
+KERNEL_HELPER_READS = {
+    "add_test_executable": {"ANYPS5_TEST_OUTPUT_DIRECTORY", "MINGW"},
+    "configure_host_test_executable": {"MINGW"},
+    "add_asan_test_options": {"ANYPS5_ENABLE_ASAN"},
+    "configure_windows_unwind": {"MINGW", "CMAKE_OBJCOPY"},
+    "configure_macos_unwind": {"APPLE"},
+}
 
 
 class SplitError(Exception):
@@ -519,11 +531,112 @@ def reads(facts):
     return (facts.uses - (facts.defines - facts.accumulates)) | facts.accumulates
 
 
+def variable_effects(command):
+    arguments, name = command.arguments, command.name
+    used = set().union(*(set(VARIABLE.findall(argument)) for argument in arguments))
+    written = set()
+
+    def variable(index):
+        if not -len(arguments) <= index < len(arguments) or not IDENT.fullmatch(arguments[index]):
+            raise SplitError(f"line {command.first + 1}: a computed or unsupported variable binding requires a manual migration")
+        return arguments[index]
+
+    def binding(index, read=False):
+        output = variable(index)
+        written.add(output)
+        if read:
+            used.add(output)
+
+    def unsupported():
+        operation = arguments[0] if arguments else ""
+        raise SplitError(f"line {command.first + 1}: unsupported {name}({operation}) effects require a manual migration")
+
+    if name in {"set", "unset", "option", "get_target_property", "get_test_property", "get_directory_property",
+                "get_property", "get_filename_component", "separate_arguments"}:
+        binding(0, name == "separate_arguments" and len(arguments) == 1)
+        if name == "get_directory_property":
+            offset = 3 if arguments[1:2] == ["DIRECTORY"] else 1
+            if arguments[offset:offset + 1] == ["DEFINITION"]:
+                used.add(variable(offset + 1))
+    elif name == "math":
+        if arguments[:1] != ["EXPR"]:
+            unsupported()
+        binding(1)
+    elif name == "string":
+        operation = arguments[0] if arguments else ""
+        outputs = {"FIND": 3, "REPLACE": 3, "CONCAT": 1, "JOIN": 2, "TOLOWER": 2, "TOUPPER": 2,
+                   "LENGTH": 2, "SUBSTRING": 4, "STRIP": 2, "GENEX_STRIP": 2, "REPEAT": 3, "COMPARE": 4,
+                   "HEX": 2, "MAKE_C_IDENTIFIER": 2, "ASCII": -1, "TIMESTAMP": 1, "UUID": 1,
+                   "MD5": 1, "SHA1": 1, "SHA224": 1, "SHA256": 1, "SHA384": 1, "SHA512": 1,
+                   "SHA3_224": 1, "SHA3_256": 1, "SHA3_384": 1, "SHA3_512": 1}
+        if operation in outputs:
+            binding(outputs[operation])
+        elif operation in {"APPEND", "PREPEND"}:
+            binding(1, True)
+        elif operation == "REGEX" and arguments[1:2] in (["MATCH"], ["MATCHALL"], ["REPLACE"]):
+            binding(4 if arguments[1] == "REPLACE" else 3)
+            written.update({"CMAKE_MATCH_COUNT"} | {f"CMAKE_MATCH_{index}" for index in range(10)})
+        else:
+            unsupported()
+    elif name == "list":
+        operation = arguments[0] if arguments else ""
+        outputs = {"LENGTH": 2, "GET": -1, "JOIN": 3, "SUBLIST": 4, "FIND": 3}
+        if len(arguments) < 2 or not IDENT.fullmatch(arguments[1]):
+            unsupported()
+        used.add(arguments[1])
+        if operation in outputs:
+            binding(outputs[operation])
+        elif operation in {"APPEND", "PREPEND", "INSERT", "REMOVE_ITEM", "REMOVE_AT", "REMOVE_DUPLICATES", "SORT", "REVERSE"}:
+            binding(1)
+        elif operation in {"POP_BACK", "POP_FRONT"}:
+            binding(1)
+            for index in range(2, len(arguments)):
+                binding(index)
+        else:
+            unsupported()
+    elif name == "file":
+        operation = arguments[0] if arguments else ""
+        outputs = {"READ": 2, "STRINGS": 2, "TIMESTAMP": 2, "SIZE": 2, "READ_SYMLINK": 2, "REAL_PATH": 2,
+                   "RELATIVE_PATH": 1, "TO_CMAKE_PATH": 2, "TO_NATIVE_PATH": 2, "GLOB": 1, "GLOB_RECURSE": 1,
+                   "MD5": 2, "SHA1": 2, "SHA224": 2, "SHA256": 2, "SHA384": 2, "SHA512": 2,
+                   "SHA3_224": 2, "SHA3_256": 2, "SHA3_384": 2, "SHA3_512": 2}
+        if operation in outputs:
+            binding(outputs[operation])
+            if operation == "STRINGS" and "REGEX" in arguments[3:]:
+                written.update({"CMAKE_MATCH_COUNT"} | {f"CMAKE_MATCH_{index}" for index in range(10)})
+        elif operation == "MAKE_DIRECTORY":
+            if "RESULT" in arguments[1:]:
+                binding(arguments.index("RESULT", 1) + 1)
+        elif operation not in {"WRITE", "APPEND", "GENERATE", "TOUCH", "TOUCH_NOCREATE", "REMOVE", "REMOVE_RECURSE"}:
+            unsupported()
+    elif name in STRICT_OPAQUE or name == "set_property" and arguments[:1] not in (["TARGET"], ["TEST"]):
+        unsupported()
+    elif name in {"if", "elseif", "while"}:
+        used.update(argument for argument in arguments if IDENT.fullmatch(argument))
+        if "MATCHES" in arguments:
+            written.update({"CMAKE_MATCH_COUNT"} | {f"CMAKE_MATCH_{index}" for index in range(10)})
+    elif name == "foreach":
+        if "ZIP_LISTS" in arguments:
+            unsupported()
+        if "LISTS" in arguments:
+            for variable in arguments[arguments.index("LISTS") + 1:]:
+                if variable == "ITEMS":
+                    break
+                if not IDENT.fullmatch(variable):
+                    unsupported()
+                used.add(variable)
+    elif name in {"block", "return"} and "PROPAGATE" in arguments:
+        unsupported()
+    return used, written
+
+
 class Plan:
     def __init__(self, text, execution=(), spec=AGC_SPEC):
         self.spec = spec
         self.lines = text.split("\n")
         self.roots = tree(text)
+        if spec.strict:
+            self.check_context()
         self.atoms = list(atoms(self.roots))
         self.facts = [facts_of(atom, spec) for atom in self.atoms]
         self.known = {name for facts in self.facts for name in facts.targets | facts.subject_targets | set(facts.tests.values())
@@ -532,6 +645,139 @@ class Plan:
         self.test_units = {test: self.unit_of_test(test, executable) for facts in self.facts for test, executable in facts.tests.items()}
         self.units = self.assign()
         self.include = self.place()
+        if spec.strict:
+            self.check_order()
+
+    def check_context(self):
+        context = {"CMAKE_CURRENT_LIST_DIR", "CMAKE_CURRENT_LIST_FILE", "CMAKE_CURRENT_LIST_LINE", "CMAKE_PARENT_LIST_FILE",
+                   "CMAKE_CURRENT_FUNCTION_LIST_DIR", "CMAKE_CURRENT_FUNCTION_LIST_FILE", "CMAKE_CURRENT_FUNCTION_LIST_LINE"}
+        functions = set()
+        for root in self.roots:
+            for command in flatten(root):
+                if any(re.search(r"\$(?:ENV|CACHE)?\{[^}]*\$(?:ENV|CACHE)?\{", argument) for argument in command.arguments):
+                    raise SplitError(f"line {command.first + 1}: a computed variable reference requires a manual migration")
+                used = set().union(*(set(VARIABLE.findall(argument)) for argument in command.arguments))
+                if used & context:
+                    name = sorted(used & context)[0]
+                    raise SplitError(f"line {command.first + 1}: list context {name} requires a manual migration")
+                arguments = command.arguments
+                if command.name == "function":
+                    name = arguments[0].lower() if arguments else ""
+                    if not name or not literal(name) or name in functions:
+                        raise SplitError(f"line {command.first + 1}: a computed or repeated helper definition requires a manual migration")
+                    functions.add(name)
+                cache_set = command.name == "set" and (arguments[:1] and arguments[0].startswith("CACHE{")
+                            or len(arguments) >= 4 and arguments[-3] == "CACHE"
+                            or len(arguments) >= 5 and arguments[-1] == "FORCE" and arguments[-4] == "CACHE")
+                scope_set = command.name in {"set", "unset"} and arguments[-1:] == ["PARENT_SCOPE"]
+                cache_unset = command.name == "unset" and arguments[-1:] == ["CACHE"]
+                cache_property = command.name == "set_property" and arguments[:1] == ["CACHE"]
+                cache_component = command.name == "get_filename_component" and arguments[-1:] == ["CACHE"]
+                if command.name == "macro" or cache_set or scope_set or cache_unset or cache_property or cache_component:
+                    raise SplitError(f"line {command.first + 1}: macro, parent-scope or cache effects require a manual migration")
+                if (command.name in STRICT_OPAQUE
+                        or command.name == "set_property" and arguments[:1] not in (["TARGET"], ["TEST"])
+                        or command.name in {"block", "return"} and "PROPAGATE" in arguments
+                        or command.name == "foreach" and "ZIP_LISTS" in arguments):
+                    variable_effects(command)
+
+    def check_order(self):
+        top = [next(index for index, root in enumerate(self.roots) if root.first <= atom.node.first <= root.last)
+               for atom in self.atoms]
+        order = [index for index, unit in enumerate(self.units) if not unit and top[index] < self.include]
+        for unit in sorted(set(filter(None, self.units))):
+            order.extend(index for index, owner in enumerate(self.units) if owner == unit)
+        order.extend(index for index, unit in enumerate(self.units) if not unit and top[index] >= self.include)
+        position = {atom: index for index, atom in enumerate(order)}
+        functions = {atom.node.header.arguments[0].lower(): atom.node for atom in self.atoms
+                     if isinstance(atom.node, Block) and atom.node.header.name == "function"}
+        commands = [[condition.header for condition in atom.conditions]
+                    + ([] if isinstance(atom.node, Block) and atom.node.header.name == "function" else list(atom.flat()))
+                    for atom in self.atoms]
+        effects = {command: variable_effects(command) for calls in commands for command in calls}
+        initializers = {name for _used, written in effects.values() for name in written if name.startswith("CMAKE_")}
+        target_calls = DEFINERS | SUBJECT_FIRST | set(HELPERS) | set(functions) | {"configure_host_test_executable"}
+        function_reads, function_calls, parameters = {}, {}, {}
+        for name, node in functions.items():
+            function_reads[name], function_calls[name] = set(), set()
+            parameters[name] = set(node.header.arguments[1:])
+            for command in flatten(node):
+                if command is node.header or command is node.end:
+                    continue
+                if (command.name == "function" or command.name in {"get_target_property", "get_test_property"}
+                        or command.name == "get_property" and command.arguments[1:2] in (["TARGET"], ["TEST"])
+                        or command.name in {"if", "elseif", "while"} and {"TARGET", "TEST"} & set(command.arguments)):
+                    raise SplitError(f"line {command.first + 1}: helper scope or target introspection requires a manual migration")
+                command_used, _written = variable_effects(command)
+                function_reads[name] |= command_used
+                function_reads[name].update(KERNEL_HELPER_READS.get(command.name, ()))
+                if command.name in target_calls:
+                    function_reads[name] |= initializers
+                if command.name in functions:
+                    function_calls[name].add(command.name)
+            function_reads[name] -= parameters[name]
+            function_reads[name] = {variable for variable in function_reads[name] if not re.fullmatch(r"ARG[CVN]|ARGV[0-9]*", variable)}
+        while True:
+            fresh = {name: (used | set().union(*(function_reads[callee] for callee in function_calls[name]))) - parameters[name]
+                     for name, used in function_reads.items()}
+            if fresh == function_reads:
+                break
+            function_reads = fresh
+        definitions, readers, targets, tests = {}, {}, {}, {}
+
+        def preserve(first, last, reason):
+            if first != last and position[first] > position[last]:
+                begin = self.atoms[first].node.first + 1
+                end = self.atoms[last].node.first + 1
+                raise SplitError(f"cannot preserve {reason} order between lines {begin} and {end}; migrate the dependent registrations by hand")
+
+        for index, facts in enumerate(self.facts):
+            for target in facts.targets:
+                targets.setdefault(target, []).append(index)
+            for test in facts.tests:
+                tests.setdefault(test, []).append(index)
+        for index, (atom, facts) in enumerate(zip(self.atoms, self.facts)):
+            used, written = set(), set()
+            referenced_targets = facts.subject_targets - facts.targets
+            referenced_tests = facts.subject_tests - set(facts.tests)
+            for command in commands[index]:
+                command_used, command_written = effects[command]
+                used |= command_used
+                used |= function_reads.get(command.name, set())
+                used.update(KERNEL_HELPER_READS.get(command.name, ()))
+                if command.name in target_calls:
+                    used |= initializers
+                written |= command_written
+                if command.name == "get_property" and command.arguments[1:2] in (["TARGET"], ["TEST"]):
+                    name = command.arguments[2] if len(command.arguments) > 2 else ""
+                    if not name or not literal(name):
+                        raise SplitError(f"line {command.first + 1}: a computed property subject requires a manual migration")
+                    (referenced_targets if command.arguments[1] == "TARGET" else referenced_tests).add(name)
+                if command.name not in {"if", "elseif", "while"}:
+                    continue
+                arguments = command.arguments
+                for offset, keyword in enumerate(arguments[:-1]):
+                    if keyword not in ("TARGET", "TEST"):
+                        continue
+                    name = arguments[offset + 1]
+                    if not literal(name):
+                        raise SplitError(f"line {command.first + 1}: a computed {keyword.lower()} condition requires a manual migration")
+                    (referenced_targets if keyword == "TARGET" else referenced_tests).add(name)
+            for name in used - facts.loop:
+                if name in definitions:
+                    preserve(definitions[name], index, f"variable {name}")
+                readers.setdefault(name, set()).add(index)
+            for name in written - facts.loop:
+                if name in definitions:
+                    preserve(definitions[name], index, f"variable {name}")
+                for reader in readers.get(name, ()):
+                    preserve(reader, index, f"variable {name}")
+                readers[name] = set()
+                definitions[name] = index
+            for referenced, owners, kind in ((referenced_targets, targets, "target"), (referenced_tests, tests, "test")):
+                for name in referenced:
+                    for owner in owners.get(name, ()):
+                        preserve(min(owner, index), max(owner, index), f"{kind} {name}")
 
     def unit_of_test_name(self, test):
         stems = [unit for unit in self.known if test == unit[:-6] or test.startswith(unit[:-6] + "_")]
@@ -897,6 +1143,77 @@ def apply_change(base, change, lists, read, execution=(), spec=AGC_SPEC):
     return written, conflicted
 
 
+def conflict_marker_size(root, path):
+    attribute = git(root, "check-attr", "-z", "conflict-marker-size", "--", path).split("\0")
+    if len(attribute) < 3:
+        raise SplitError(f"cannot determine Git's conflict marker size for {path}; preserve it and resolve it by hand")
+    value = attribute[2]
+    return int(value) if value.isdigit() and int(value) > 0 else 7
+
+
+def conflict_matches(current, expected, marker_size, labels):
+    actual_lines, expected_lines = current.splitlines(keepends=True), expected.splitlines(keepends=True)
+    if len(actual_lines) != len(expected_lines):
+        return False
+    markers = {character * marker_size + " " + label: character * marker_size for character, label in zip("<|>", labels)}
+    for actual, wanted in zip(actual_lines, expected_lines):
+        marker = markers.get(wanted.removesuffix("\n"))
+        if marker:
+            if actual.endswith("\n") != wanted.endswith("\n"):
+                return False
+            content = actual.removesuffix("\n")
+            if content != marker and not content.startswith(marker + " "):
+                return False
+        elif actual != wanted:
+            return False
+    return True
+
+
+def check_parent_conflict(root, path, base, ours, theirs):
+    current = (root / path).read_text(encoding="utf-8")
+    marker_size = conflict_marker_size(root, path)
+    sentinel = "anyps5-resolver-conflict"
+    while any(sentinel in text for text in (base, ours, theirs, current)):
+        sentinel += "_"
+    labels = tuple(sentinel + " " + side for side in ("ours", "base", "theirs"))
+    with tempfile.TemporaryDirectory() as directory:
+        paths = []
+        for name, text in (("ours", ours), ("base", base), ("theirs", theirs)):
+            file = Path(directory) / name
+            write_lf(file, text)
+            paths.append(str(file))
+        for style in ("merge", "diff3", "zdiff3"):
+            result = subprocess.run(["git", "-c", f"merge.conflictStyle={style}", "merge-file", "-p",
+                                     f"--marker-size={marker_size}", "-L", labels[0], "-L", labels[1], "-L", labels[2], *paths],
+                                    cwd=root, capture_output=True, text=True, encoding="utf-8")
+            if not 0 <= result.returncode < 128:
+                raise SplitError(f"cannot reconstruct Git's conflict for {path}; preserve it and resolve it by hand")
+            if conflict_matches(current, result.stdout, marker_size, labels):
+                return
+    raise SplitError(f"{path} has working-tree edits to Git's conflict result; preserve those edits and resolve it by hand")
+
+
+def check_fragment_worktree(root, path):
+    indexed = git(root, "ls-files", "--stage", "--", path).strip()
+    file = root / path
+    if not indexed:
+        different = file.exists() or file.is_symlink()
+    else:
+        mode, blob, _stage = indexed.split("\t", 1)[0].split()
+        if mode not in ("100644", "100755") or file.is_symlink():
+            raise SplitError(f"{path} is not a regular indexed fragment; preserve it and resolve it by hand")
+        current = git(root, "hash-object", f"--path={path}", "--", path).strip() if file.exists() else None
+        different = current != blob
+    if different:
+        raise SplitError(f"{path} has different index and working-tree contents; preserve or stage those changes before running resolve")
+    status = git(root, "ls-files", "-v", "-z", "--", path)
+    if status and status[0] != "H":
+        raise SplitError(f"{path} has index flags that prevent safe staging; clear assume-unchanged or skip-worktree before running resolve")
+    if indexed and git(root, "config", "--bool", "--get", "core.filemode", check=False).strip() != "false":
+        if bool(file.stat().st_mode & 0o100) != (mode == "100755"):
+            raise SplitError(f"{path} has different index and working-tree modes; preserve or stage those changes before running resolve")
+
+
 def command_resolve(root, spec=AGC_SPEC):
     stages = {}
     for line in git(root, "ls-files", "-u", "--", spec.lists).splitlines():
@@ -912,11 +1229,20 @@ def command_resolve(root, spec=AGC_SPEC):
 
     def read(path):
         file = root / path
-        return file.read_text(encoding="utf-8") if file.exists() else ""
+        text = file.read_text(encoding="utf-8") if file.exists() else ""
+        size = min(7, conflict_marker_size(root, path))
+        if re.search(rf"(?m)^(?:<{{{size},}}|\|{{{size},}}|={{{size},}}|>{{{size},}})(?:[ \t]|$)", text):
+            raise SplitError(f"{path} contains conflict markers; preserve it and resolve it by hand")
+        check_fragment_worktree(root, path)
+        return text
 
     try:
+        unmerged = sorted(filter(None, git(root, "diff", "--name-only", "--diff-filter=U", "-z", "--", spec.fragments).split("\0")))
+        if unmerged:
+            raise SplitError("unresolved fragment conflicts in " + ", ".join(unmerged) + "; resolve and stage them before running resolve")
+        check_parent_conflict(root, spec.lists, base, ours, theirs)
         written, conflicted = apply_change(base, change, lists, read, known_targets(root, spec), spec)
-    except SplitError as error:
+    except (SplitError, OSError, subprocess.CalledProcessError) as error:
         sys.exit(f"{spec.lists}: {error}")
     written.setdefault(spec.lists, lists)
     for path, text in written.items():
