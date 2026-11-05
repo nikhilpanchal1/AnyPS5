@@ -3,7 +3,9 @@ import re
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 LISTS = "core/libs/prx/libSceAgcDriver/CMakeLists.txt"
 FRAGMENTS = "core/libs/prx/libSceAgcDriver/tests/cmake"
@@ -15,6 +17,36 @@ INCLUDE = [
     "    include(${agcTestFragment})",
     "endforeach()",
 ]
+
+
+@dataclass(frozen=True)
+class SplitSpec:
+    library: str = "libSceAgcDriver"
+    variable: str = "agcTest"
+    execution: Optional[str] = EXECUTION
+    custom_target_commands: bool = False
+
+    @property
+    def lists(self):
+        return f"core/libs/prx/{self.library}/CMakeLists.txt"
+
+    @property
+    def fragments(self):
+        return f"core/libs/prx/{self.library}/tests/cmake"
+
+    @property
+    def include(self):
+        return [
+            f"file(GLOB {self.variable}Fragments CONFIGURE_DEPENDS ${{CMAKE_CURRENT_SOURCE_DIR}}/tests/cmake/*.cmake)",
+            f"list(SORT {self.variable}Fragments)",
+            f"foreach({self.variable}Fragment IN LISTS {self.variable}Fragments)",
+            f"    include(${{{self.variable}Fragment}})",
+            "endforeach()",
+        ]
+
+
+AGC_SPEC = SplitSpec()
+KERNEL_SPEC = SplitSpec("libkernel", "kernelTest", None, True)
 
 OPEN = {"if": "endif", "foreach": "endforeach", "while": "endwhile", "function": "endfunction", "macro": "endmacro", "block": "endblock"}
 BRANCH = {"elseif", "else"}
@@ -383,7 +415,7 @@ def expand(name, items):
     return names
 
 
-def facts_of(atom):
+def facts_of(atom, spec=AGC_SPEC):
     facts = Facts()
     if isinstance(atom.node, Block) and atom.node.header.name in ("function", "macro"):
         facts.functions.add(atom.node.header.arguments[0].lower())
@@ -443,6 +475,8 @@ def facts_of(atom):
                 facts.dynamic_tests.append((test, executable))
         elif name in SUBJECT_FIRST and arguments:
             subject(facts, arguments[:1], "target")
+        elif spec.custom_target_commands and name == "add_custom_command" and arguments[:1] == ["TARGET"]:
+            subject(facts, arguments[1:2], "target")
         elif name == "add_asan_test_options" and arguments:
             subject(facts, arguments[:1], "test")
         elif name == "set_target_properties":
@@ -486,11 +520,12 @@ def reads(facts):
 
 
 class Plan:
-    def __init__(self, text, execution=()):
+    def __init__(self, text, execution=(), spec=AGC_SPEC):
+        self.spec = spec
         self.lines = text.split("\n")
         self.roots = tree(text)
         self.atoms = list(atoms(self.roots))
-        self.facts = [facts_of(atom) for atom in self.atoms]
+        self.facts = [facts_of(atom, spec) for atom in self.atoms]
         self.known = {name for facts in self.facts for name in facts.targets | facts.subject_targets | set(facts.tests.values())
                       if name and UNIT.fullmatch(name)} | set(execution)
         self.external = self.known - {name for facts in self.facts for name in facts.targets}
@@ -636,7 +671,7 @@ class Plan:
     def place(self):
         moved = [index for index, unit in enumerate(self.units) if unit]
         if not moved:
-            raise SplitError(f"{LISTS} registers no tests to move")
+            raise SplitError(f"{self.spec.lists} registers no tests to move")
 
         def union(field):
             return set().union(*(getattr(self.facts[index], field) for index in moved))
@@ -716,8 +751,8 @@ def fragment_text(lines, members):
     return "\n".join(out) + "\n"
 
 
-def split_text(text, execution=()):
-    plan = Plan(text, execution)
+def split_text(text, execution=(), spec=AGC_SPEC):
+    plan = Plan(text, execution, spec)
     lines = plan.lines
     units = {}
     for atom, unit in zip(plan.atoms, plan.units):
@@ -737,11 +772,11 @@ def split_text(text, execution=()):
     kept = []
     for index, line in enumerate(lines):
         if index == at:
-            kept.extend([""] + INCLUDE + [""])
+            kept.extend([""] + spec.include + [""])
         if index not in deleted:
             kept.append(line)
     if at >= len(lines):
-        kept.extend([""] + INCLUDE)
+        kept.extend([""] + spec.include)
     residual = []
     for line in kept:
         if not line.strip() and (not residual or not residual[-1].strip() or opener(residual[-1])):
@@ -754,32 +789,34 @@ def split_text(text, execution=()):
     return "\n".join(residual) + "\n", {name: fragment_text(lines, members) for name, members in units.items()}
 
 
-def migrated(text, execution=()):
-    return split_text(refactor(text), execution)
+def migrated(text, execution=(), spec=AGC_SPEC):
+    return split_text(refactor(text) if spec.execution else text, execution, spec)
 
 
 def execution_target(stem):
     return "agc_driver_" + re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", stem).lower() + "_tests"
 
 
-def execution_targets(root):
-    return sorted(execution_target(path.stem) for path in (root / EXECUTION).glob("*.cpp"))
+def execution_targets(root, spec=AGC_SPEC):
+    return sorted(execution_target(path.stem) for path in (root / spec.execution).glob("*.cpp")) if spec.execution else []
 
 
-def known_targets(root):
-    known = set(execution_targets(root)) | {path.stem for path in (root / FRAGMENTS).glob("*.cmake")}
+def known_targets(root, spec=AGC_SPEC):
+    known = set(execution_targets(root, spec)) | {path.stem for path in (root / spec.fragments).glob("*.cmake")}
+    if not spec.execution:
+        return sorted(known)
     revisions = ["HEAD"]
     for head in ("REBASE_HEAD", "CHERRY_PICK_HEAD", "MERGE_HEAD"):
         if git(root, "rev-parse", "-q", "--verify", head, check=False).strip():
             revisions += [head, head + "^", git(root, "merge-base", "HEAD", head, check=False).strip()]
     for revision in filter(None, revisions):
-        listing = git(root, "ls-tree", "--name-only", f"{revision}:{EXECUTION}", check=False)
+        listing = git(root, "ls-tree", "--name-only", f"{revision}:{spec.execution}", check=False)
         known |= {execution_target(Path(name).stem) for name in listing.splitlines() if name.endswith(".cpp")}
     return sorted(known)
 
 
-def is_split(text):
-    return INCLUDE[0] in text
+def is_split(text, spec=AGC_SPEC):
+    return spec.include[0] in text
 
 
 def git(root, *args, check=True):
@@ -793,31 +830,33 @@ def write_lf(path, text):
         file.write(text)
 
 
-def fragment_path(name):
-    return f"{FRAGMENTS}/{name}.cmake"
+def fragment_path(name, spec=AGC_SPEC):
+    return f"{spec.fragments}/{name}.cmake"
 
 
-def command_refactor(root):
-    text = (root / LISTS).read_text(encoding="utf-8")
+def command_refactor(root, spec=AGC_SPEC):
+    if not spec.execution:
+        raise SplitError(f"{spec.library} has no registration loops to refactor")
+    text = (root / spec.lists).read_text(encoding="utf-8")
     changed = refactor(text)
     if changed == text:
-        sys.exit(f"{LISTS} already registers its default tests through agc_add_default_test")
-    write_lf(root / LISTS, changed)
-    print(LISTS)
+        sys.exit(f"{spec.lists} already registers its default tests through agc_add_default_test")
+    write_lf(root / spec.lists, changed)
+    print(spec.lists)
 
 
-def command_split(root):
-    text = (root / LISTS).read_text(encoding="utf-8")
-    if is_split(text):
-        sys.exit(f"{LISTS} already includes {FRAGMENTS}")
-    lists, fragments = migrated(text, execution_targets(root))
-    existing = sorted(set(fragments) & {path.stem for path in (root / FRAGMENTS).glob("*.cmake")})
+def command_split(root, spec=AGC_SPEC):
+    text = (root / spec.lists).read_text(encoding="utf-8")
+    if is_split(text, spec):
+        sys.exit(f"{spec.lists} already includes {spec.fragments}")
+    lists, fragments = migrated(text, execution_targets(root, spec), spec)
+    existing = sorted(set(fragments) & {path.stem for path in (root / spec.fragments).glob("*.cmake")})
     if existing:
-        sys.exit(f"{FRAGMENTS} already has {', '.join(name + '.cmake' for name in existing)}")
+        sys.exit(f"{spec.fragments} already has {', '.join(name + '.cmake' for name in existing)}")
     for name, body in fragments.items():
-        write_lf(root / fragment_path(name), body)
-    write_lf(root / LISTS, lists)
-    print(f"{len(fragments)} fragments in {FRAGMENTS}, {len(lists.splitlines())} lines left in {LISTS}")
+        write_lf(root / fragment_path(name, spec), body)
+    write_lf(root / spec.lists, lists)
+    print(f"{len(fragments)} fragments in {spec.fragments}, {len(lists.splitlines())} lines left in {spec.lists}")
 
 
 def merge(base, ours, theirs, label):
@@ -837,20 +876,20 @@ def merge(base, ours, theirs, label):
     return result.stdout, result.returncode > 0
 
 
-def apply_change(base, change, lists, read, execution=()):
-    base_lists, base_fragments = migrated(base, execution)
-    change_lists, change_fragments = migrated(change, execution)
+def apply_change(base, change, lists, read, execution=(), spec=AGC_SPEC):
+    base_lists, base_fragments = migrated(base, execution, spec)
+    change_lists, change_fragments = migrated(change, execution, spec)
     written, conflicted = {}, []
-    merged, clash = merge(base_lists, lists, change_lists, LISTS)
+    merged, clash = merge(base_lists, lists, change_lists, spec.lists)
     if merged != lists:
-        written[LISTS] = merged
+        written[spec.lists] = merged
     if clash:
-        conflicted.append(LISTS)
+        conflicted.append(spec.lists)
     for name in sorted(set(base_fragments) | set(change_fragments)):
         before, after = base_fragments.get(name, ""), change_fragments.get(name, "")
         if before == after:
             continue
-        path = fragment_path(name)
+        path = fragment_path(name, spec)
         merged, clash = merge(before, read(path), after, path)
         written[path] = merged
         if clash:
@@ -858,28 +897,28 @@ def apply_change(base, change, lists, read, execution=()):
     return written, conflicted
 
 
-def command_resolve(root):
+def command_resolve(root, spec=AGC_SPEC):
     stages = {}
-    for line in git(root, "ls-files", "-u", "--", LISTS).splitlines():
+    for line in git(root, "ls-files", "-u", "--", spec.lists).splitlines():
         meta, _ = line.split("\t", 1)
         _, sha, stage = meta.split()
         stages[stage] = sha
     if not {"1", "2", "3"} <= set(stages):
-        sys.exit(f"{LISTS} is not in a three-way conflict")
+        sys.exit(f"{spec.lists} is not in a three-way conflict")
     base, ours, theirs = (git(root, "cat-file", "-p", stages[stage]) for stage in "123")
-    if is_split(base) or is_split(ours) == is_split(theirs):
-        sys.exit(f"{LISTS}: the conflict is not between a change made before the split and the split; resolve it by hand")
-    lists, change = (ours, theirs) if is_split(ours) else (theirs, ours)
+    if is_split(base, spec) or is_split(ours, spec) == is_split(theirs, spec):
+        sys.exit(f"{spec.lists}: the conflict is not between a change made before the split and the split; resolve it by hand")
+    lists, change = (ours, theirs) if is_split(ours, spec) else (theirs, ours)
 
     def read(path):
         file = root / path
         return file.read_text(encoding="utf-8") if file.exists() else ""
 
     try:
-        written, conflicted = apply_change(base, change, lists, read, known_targets(root))
+        written, conflicted = apply_change(base, change, lists, read, known_targets(root, spec), spec)
     except SplitError as error:
-        sys.exit(f"{LISTS}: {error}")
-    written.setdefault(LISTS, lists)
+        sys.exit(f"{spec.lists}: {error}")
+    written.setdefault(spec.lists, lists)
     for path, text in written.items():
         if text.strip():
             write_lf(root / path, text)
@@ -897,19 +936,22 @@ def main(argv=None):
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description=f"Move the AGC test registrations of {LISTS} into one fragment per test executable, "
+    parser = argparse.ArgumentParser(description="Move library test registrations into fragments per test executable, "
                                                  "and move registrations of a change made before the split")
     parser.add_argument("command", choices=("refactor", "split", "resolve"),
-                        help="refactor: register default, draw-pipeline and SPIR-V mode tests through functions; "
-                             f"split: refactor, then move the registrations into {FRAGMENTS}/; "
-                             f"resolve: during a rebase or merge stopped on {LISTS}, apply the change's registrations to the "
-                             "fragments and stage them")
+                        help="refactor: convert the AGC registration loops into functions; "
+                             "split: move the selected library's test registrations into its tests/cmake/ fragments; "
+                             "resolve: during a rebase or merge stopped on that library's CMakeLists.txt, "
+                             "apply the change's registrations to the fragments and stage them")
+    parser.add_argument("--library", choices=("libSceAgcDriver", "libkernel"), default="libSceAgcDriver",
+                        help="library to migrate (default: libSceAgcDriver)")
     args = parser.parse_args(argv)
+    spec = KERNEL_SPEC if args.library == "libkernel" else AGC_SPEC
     root = Path(git(Path.cwd(), "rev-parse", "--show-toplevel").strip())
     try:
-        {"refactor": command_refactor, "split": command_split, "resolve": command_resolve}[args.command](root)
+        {"refactor": command_refactor, "split": command_split, "resolve": command_resolve}[args.command](root, spec)
     except SplitError as error:
-        sys.exit(f"{LISTS}: {error}")
+        sys.exit(f"{spec.lists}: {error}")
 
 
 if __name__ == "__main__":

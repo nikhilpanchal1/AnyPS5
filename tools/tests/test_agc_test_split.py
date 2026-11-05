@@ -264,5 +264,232 @@ class ResolveTests(unittest.TestCase):
         self.assertIn("already includes", result.stderr)
 
 
+KERNEL_ALPHA = """    add_test_executable(kernel_alpha_tests tests/Alpha.cpp)
+    target_link_libraries(kernel_alpha_tests PRIVATE libkernel libc)
+    add_test(NAME kernel_alpha COMMAND kernel_alpha_tests)
+    set_tests_properties(kernel_alpha PROPERTIES TIMEOUT 20)
+"""
+KERNEL_BETA = """    add_test_executable(kernel_beta_tests tests/Beta.cpp)
+    add_test(NAME kernel_beta COMMAND kernel_beta_tests)
+"""
+MTYPEPROTECT = """    add_test_executable(guest_mtypeprotect_tests ${LIBS_INCLUDE_DIR}/tests/GuestMtypeprotect.cpp)
+    target_include_directories(guest_mtypeprotect_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_mtypeprotect_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_mtypeprotect_tests)
+    add_test(NAME guest_mtypeprotect COMMAND guest_mtypeprotect_tests)
+    set_tests_properties(guest_mtypeprotect PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_mtypeprotect PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+"""
+
+
+def kernel_original(blocks=(KERNEL_ALPHA, KERNEL_BETA), library="Export.cpp", prefix=""):
+    return (f"add_library(libkernel SHARED EXCLUDE_FROM_ALL {library})\n"
+            "target_link_libraries(libkernel PRIVATE libc)\n"
+            "target_compile_features(libkernel PRIVATE cxx_std_20)\n"
+            "configure_windows_unwind(libkernel)\n"
+            "target_include_directories(libkernel PRIVATE include)\n\n"
+            "if(BUILD_TESTING)\n" + prefix + "\n".join(blocks) + "endif()\n")
+
+
+class KernelSplitTests(unittest.TestCase):
+    def test_library_specs_are_immutable_and_do_not_change_each_other(self):
+        agc_before = agc_test_split.migrated(original(), EXECUTION)
+        spec = agc_test_split.KERNEL_SPEC
+        with self.assertRaises(AttributeError):
+            spec.library = "libc"
+        lists, fragments = agc_test_split.migrated(kernel_original(), spec=spec)
+        self.assertEqual(sorted(fragments), ["kernel_alpha_tests", "kernel_beta_tests"])
+        self.assertIn("file(GLOB kernelTestFragments CONFIGURE_DEPENDS", lists)
+        self.assertNotIn("agcTestFragments", lists)
+        self.assertIn("add_library(libkernel SHARED EXCLUDE_FROM_ALL Export.cpp)", lists)
+        self.assertNotIn("kernel_alpha", lists)
+        self.assertEqual(agc_test_split.migrated(original(), EXECUTION), agc_before)
+        self.assertEqual(agc_test_split.migrated(kernel_original(), spec=spec), (lists, fragments))
+
+    def test_post_build_command_moves_with_its_target(self):
+        command = ("    add_custom_command(TARGET kernel_alpha_tests POST_BUILD\n"
+                   "        COMMAND ${CMAKE_COMMAND} -E echo $<TARGET_FILE:kernel_alpha_tests>\n"
+                   "        VERBATIM)\n")
+        lists, fragments = agc_test_split.migrated(kernel_original((KERNEL_ALPHA + command, KERNEL_BETA)),
+                                                  spec=agc_test_split.KERNEL_SPEC)
+        self.assertNotIn("add_custom_command", lists)
+        self.assertIn(command, fragments["kernel_alpha_tests"])
+
+    def test_agc_preserves_existing_post_build_command_placement(self):
+        command = ("    add_custom_command(TARGET agc_alpha_tests POST_BUILD\n"
+                   "        COMMAND ${CMAKE_COMMAND} -E echo $<TARGET_FILE:agc_alpha_tests>\n"
+                   "        VERBATIM)\n")
+        text = ("add_library(libSceAgcDriver SHARED Export.cpp)\n"
+                "if(BUILD_TESTING)\n" + ALPHA + command + "endif()\n")
+        lists, fragments = agc_test_split.split_text(text)
+        self.assertIn(command, lists)
+        self.assertNotIn("add_custom_command", fragments["agc_alpha_tests"])
+        self.assertLess(lists.index(agc_test_split.INCLUDE[0]), lists.index("add_custom_command"))
+
+    def test_shared_fixtures_and_registration_helpers_remain_in_parent(self):
+        prefix = ("    add_library(kernel_fixture SHARED tests/Fixture.cpp)\n"
+                  "    target_compile_definitions(kernel_fixture PRIVATE FIXTURE_COMPLETE)\n"
+                  "    function(add_kernel_case name)\n"
+                  "        add_test(NAME helper_${name} COMMAND kernel_alpha_tests ${name})\n"
+                  "    endfunction()\n"
+                  "    add_kernel_case(one)\n")
+        lists, fragments = agc_test_split.migrated(kernel_original(prefix=prefix), spec=agc_test_split.KERNEL_SPEC)
+        self.assertIn(prefix, lists)
+        self.assertLess(lists.index("add_kernel_case(one)"), lists.index("file(GLOB kernelTestFragments"))
+        self.assertNotIn("kernel_fixture", "".join(fragments.values()))
+
+
+class KernelResolveTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.spec = agc_test_split.KERNEL_SPEC
+        self.git("init", "-q", "-b", "main")
+        self.write(self.spec.lists, kernel_original())
+        self.write(LISTS, original())
+        self.commit("build: register tests")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def git(self, *args, check=True):
+        return subprocess.run(["git", "-c", "user.name=Split Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false",
+                               "-c", "core.editor=true", *args], cwd=self.root, capture_output=True, text=True, check=check)
+
+    def write(self, path, text):
+        agc_test_split.write_lf(self.root / path, text)
+
+    def read(self, path):
+        return (self.root / path).read_text(encoding="utf-8")
+
+    def fragment(self, name):
+        return agc_test_split.fragment_path(name, self.spec)
+
+    def tool(self, command):
+        return subprocess.run([sys.executable, str(TOOL), "--library", "libkernel", command], cwd=self.root,
+                              capture_output=True, text=True, timeout=60)
+
+    def commit(self, message):
+        self.git("add", "-A")
+        self.git("commit", "-qm", message)
+
+    def prepare_branches(self, change, after_split=None):
+        self.git("checkout", "-qb", "change")
+        self.write(self.spec.lists, change)
+        self.commit("test(libkernel): change registrations")
+        self.git("checkout", "-q", "main")
+        result = self.tool("split")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.commit("build(libkernel): split test registrations")
+        if after_split:
+            after_split()
+            self.commit("test(libkernel): update split registrations")
+
+    def resolve_rebase(self, change, after_split=None):
+        self.prepare_branches(change, after_split)
+        self.git("checkout", "-q", "change")
+        self.assertNotEqual(self.git("rebase", "main", check=False).returncode, 0)
+        return self.tool("resolve")
+
+    def test_mtypeprotect_registration_migrates_during_a_rebase(self):
+        result = self.resolve_rebase(kernel_original((KERNEL_ALPHA, KERNEL_BETA, MTYPEPROTECT)))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.git("rebase", "--continue")
+        self.assertEqual(self.read(self.fragment("guest_mtypeprotect_tests")), "if(BUILD_TESTING)\n" + MTYPEPROTECT + "endif()\n")
+        self.assertEqual(self.read(self.spec.lists), self.git("show", "main:" + self.spec.lists).stdout)
+        self.assertEqual(self.read(LISTS), original())
+
+    def test_mtypeprotect_registration_migrates_with_either_split_merge_side(self):
+        for split_is_ours in (True, False):
+            with self.subTest(split_is_ours=split_is_ours):
+                if self.git("branch", "--list", "change").stdout:
+                    self.git("checkout", "-q", "main")
+                    self.git("reset", "--hard", "HEAD~1")
+                    self.git("branch", "-D", "change")
+                self.prepare_branches(kernel_original((KERNEL_ALPHA, KERNEL_BETA, MTYPEPROTECT)))
+                self.git("checkout", "-q", "main" if split_is_ours else "change")
+                other = "change" if split_is_ours else "main"
+                self.assertNotEqual(self.git("merge", "--no-commit", other, check=False).returncode, 0)
+                result = self.tool("resolve")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.git("diff", "--name-only", "--diff-filter=U").stdout, "")
+                self.assertIn("add_test(NAME guest_mtypeprotect", self.read(self.fragment("guest_mtypeprotect_tests")))
+                self.git("merge", "--abort")
+
+    def test_resolve_preserves_independent_fragment_edits(self):
+        def later():
+            path = self.fragment("kernel_alpha_tests")
+            self.write(path, self.read(path).replace("PRIVATE libkernel libc", "PRIVATE libkernel libc Threads::Threads"))
+
+        change = kernel_original((KERNEL_ALPHA.replace("TIMEOUT 20", "TIMEOUT 25"), KERNEL_BETA, MTYPEPROTECT))
+        result = self.resolve_rebase(change, later)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.git("rebase", "--continue")
+        alpha = self.read(self.fragment("kernel_alpha_tests"))
+        self.assertIn("TIMEOUT 25", alpha)
+        self.assertIn("PRIVATE libkernel libc Threads::Threads", alpha)
+        self.assertTrue((self.root / self.fragment("guest_mtypeprotect_tests")).exists())
+
+    def test_resolve_preserves_an_independent_new_fragment(self):
+        gamma = ("if(BUILD_TESTING)\n"
+                 "    add_test_executable(kernel_gamma_tests tests/Gamma.cpp)\n"
+                 "    add_test(NAME kernel_gamma COMMAND kernel_gamma_tests)\n"
+                 "endif()\n")
+
+        def later():
+            self.write(self.fragment("kernel_gamma_tests"), gamma)
+
+        result = self.resolve_rebase(kernel_original((KERNEL_ALPHA, KERNEL_BETA, MTYPEPROTECT)), later)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.git("rebase", "--continue")
+        self.assertEqual(self.read(self.fragment("kernel_gamma_tests")), gamma)
+        self.assertIn("add_test(NAME guest_mtypeprotect", self.read(self.fragment("guest_mtypeprotect_tests")))
+
+    def test_resolve_keeps_same_line_conflicts_visible_and_unstaged(self):
+        def later():
+            path = self.fragment("kernel_alpha_tests")
+            self.write(path, self.read(path).replace("TIMEOUT 20", "TIMEOUT 60"))
+
+        result = self.resolve_rebase(kernel_original((KERNEL_ALPHA.replace("TIMEOUT 20", "TIMEOUT 25"), KERNEL_BETA)), later)
+        self.assertNotEqual(result.returncode, 0)
+        path = self.fragment("kernel_alpha_tests")
+        self.assertIn(path, result.stderr)
+        self.assertIn("<<<<<<<", self.read(path))
+        self.assertEqual(self.git("diff", "--cached", "--", path).stdout, "")
+
+    def test_resolve_removes_a_deleted_registration(self):
+        result = self.resolve_rebase(kernel_original((KERNEL_BETA,)))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.git("rebase", "--continue")
+        self.assertFalse((self.root / self.fragment("kernel_alpha_tests")).exists())
+        self.assertTrue((self.root / self.fragment("kernel_beta_tests")).exists())
+
+    def test_resolve_preserves_independent_production_changes(self):
+        def later():
+            self.write(self.spec.lists, self.read(self.spec.lists).replace("PRIVATE include", "PRIVATE include extra"))
+
+        result = self.resolve_rebase(kernel_original((KERNEL_ALPHA, KERNEL_BETA, MTYPEPROTECT), library="Main.cpp"), later)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.git("rebase", "--continue")
+        self.assertIn("SHARED EXCLUDE_FROM_ALL Main.cpp", self.read(self.spec.lists))
+        self.assertIn("PRIVATE include extra", self.read(self.spec.lists))
+
+    def test_split_and_refactor_refuse_without_changing_existing_files(self):
+        before = self.read(self.spec.lists)
+        result = self.tool("refactor")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no registration loops", result.stderr)
+        self.assertEqual(self.read(self.spec.lists), before)
+        self.assertEqual(self.tool("split").returncode, 0)
+        split = self.read(self.spec.lists)
+        result = self.tool("split")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already includes", result.stderr)
+        self.assertEqual(self.read(self.spec.lists), split)
+        self.assertEqual(self.read(LISTS), original())
+
+
 if __name__ == "__main__":
     unittest.main()
