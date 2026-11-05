@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_msync_tests ${LIBS_INCLUDE_DIR}/tests/GuestMsync.cpp)
+    target_include_directories(guest_msync_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_msync_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_msync_tests)
+    add_test(NAME guest_msync COMMAND guest_msync_tests)
+    set_tests_properties(guest_msync PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_msync PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

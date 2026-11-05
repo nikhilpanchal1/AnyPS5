@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(kernel_error_tests ${LIBS_INCLUDE_DIR}/tests/KernelError.cpp)
+    target_include_directories(kernel_error_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(kernel_error_tests PRIVATE libkernel libc)
+    configure_windows_unwind(kernel_error_tests)
+    add_test(NAME kernel_error COMMAND kernel_error_tests)
+    if(WIN32)
+        set_tests_properties(kernel_error PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

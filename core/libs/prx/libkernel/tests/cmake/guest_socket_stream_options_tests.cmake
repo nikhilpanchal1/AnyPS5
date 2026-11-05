@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_socket_stream_options_tests ${LIBS_INCLUDE_DIR}/tests/GuestSocketStreamOptions.cpp)
+    target_include_directories(guest_socket_stream_options_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_socket_stream_options_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_socket_stream_options_tests)
+    add_test(NAME guest_socket_stream_options COMMAND guest_socket_stream_options_tests)
+    set_tests_properties(guest_socket_stream_options PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_socket_stream_options PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

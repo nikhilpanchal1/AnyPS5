@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    if(WIN32)
+        add_test_executable(guest_windows_directory_link_types_tests ${LIBS_INCLUDE_DIR}/tests/GuestWindowsDirectoryLinkTypes.cpp)
+        target_include_directories(guest_windows_directory_link_types_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_windows_directory_link_types_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_windows_directory_link_types_tests)
+        add_test(NAME guest_windows_directory_link_types COMMAND guest_windows_directory_link_types_tests)
+        set_tests_properties(guest_windows_directory_link_types PROPERTIES TIMEOUT 15 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

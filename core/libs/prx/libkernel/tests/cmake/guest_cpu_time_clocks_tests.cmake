@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_cpu_time_clocks_tests ${LIBS_INCLUDE_DIR}/tests/GuestCpuTimeClocks.cpp)
+    target_include_directories(guest_cpu_time_clocks_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_cpu_time_clocks_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_cpu_time_clocks_tests)
+    add_test(NAME guest_cpu_time_clocks COMMAND guest_cpu_time_clocks_tests)
+    set_tests_properties(guest_cpu_time_clocks PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_cpu_time_clocks PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

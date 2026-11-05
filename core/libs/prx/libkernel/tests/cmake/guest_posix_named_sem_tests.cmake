@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_posix_named_sem_tests ${LIBS_INCLUDE_DIR}/tests/GuestPosixNamedSem.cpp)
+    target_include_directories(guest_posix_named_sem_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_posix_named_sem_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_posix_named_sem_tests)
+    add_test(NAME guest_posix_named_sem COMMAND guest_posix_named_sem_tests)
+    set_tests_properties(guest_posix_named_sem PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_posix_named_sem PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

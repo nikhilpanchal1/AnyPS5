@@ -1,0 +1,28 @@
+if(BUILD_TESTING)
+    if(WIN32)
+        add_test_executable(guest_deferred_module_tests ${LIBS_INCLUDE_DIR}/tests/GuestDeferredModule.cpp)
+        target_include_directories(guest_deferred_module_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_deferred_module_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_deferred_module_tests)
+        add_dependencies(guest_deferred_module_tests guest_deferred_module_fixture)
+        add_dependencies(guest_deferred_module_tests guest_deferred_dependent_fixture)
+        add_dependencies(guest_deferred_module_tests guest_deferred_sweep_fixture)
+        add_dependencies(guest_deferred_module_tests guest_deferred_failed_fixture guest_deferred_sweep_failed_fixture)
+        add_test(NAME guest_deferred_module_sweep_failed COMMAND guest_deferred_module_tests $<TARGET_FILE:guest_deferred_sweep_failed_fixture> sweep-failed $<TARGET_FILE:guest_deferred_module_fixture> $<TARGET_FILE:guest_deferred_failed_fixture>)
+        set_tests_properties(guest_deferred_module_sweep_failed PROPERTIES TIMEOUT 20 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        add_test(NAME guest_deferred_module_sweep COMMAND guest_deferred_module_tests $<TARGET_FILE:guest_deferred_sweep_fixture> sweep $<TARGET_FILE:guest_deferred_module_fixture>)
+        set_tests_properties(guest_deferred_module_sweep PROPERTIES TIMEOUT 20 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        foreach(mode IN ITEMS dependency dependency-nested)
+            add_test(NAME guest_deferred_module_${mode} COMMAND guest_deferred_module_tests $<TARGET_FILE:guest_deferred_dependent_fixture> ${mode} $<TARGET_FILE:guest_deferred_module_fixture>)
+            set_tests_properties(guest_deferred_module_${mode} PROPERTIES TIMEOUT 20 ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        endforeach()
+        foreach(mode IN ITEMS reload pinned parallel reentrant)
+            add_test(NAME guest_deferred_module_${mode} COMMAND guest_deferred_module_tests $<TARGET_FILE:guest_deferred_module_fixture> ${mode})
+            set_tests_properties(guest_deferred_module_${mode} PROPERTIES TIMEOUT 20 ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        endforeach()
+    endif()
+endif()

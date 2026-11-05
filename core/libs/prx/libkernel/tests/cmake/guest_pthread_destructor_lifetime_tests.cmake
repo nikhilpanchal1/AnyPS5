@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_pthread_destructor_lifetime_tests ${LIBS_INCLUDE_DIR}/tests/GuestPthreadDestructorLifetime.cpp)
+    target_include_directories(guest_pthread_destructor_lifetime_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_pthread_destructor_lifetime_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_pthread_destructor_lifetime_tests)
+    add_test(NAME guest_pthread_destructor_lifetime COMMAND guest_pthread_destructor_lifetime_tests)
+    set_tests_properties(guest_pthread_destructor_lifetime PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_pthread_destructor_lifetime PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

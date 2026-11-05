@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_pipe_fault_tests ${LIBS_INCLUDE_DIR}/tests/GuestPipeFault.cpp)
+    target_include_directories(guest_pipe_fault_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_pipe_fault_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_pipe_fault_tests)
+    add_test(NAME guest_pipe_fault COMMAND guest_pipe_fault_tests)
+    set_tests_properties(guest_pipe_fault PROPERTIES TIMEOUT 15)
+    if(WIN32)
+        set_tests_properties(guest_pipe_fault PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

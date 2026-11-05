@@ -1,0 +1,17 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_semaphore_tests ${LIBS_INCLUDE_DIR}/tests/GuestSemaphore.cpp)
+    target_include_directories(guest_semaphore_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_semaphore_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_semaphore_tests)
+    add_test(NAME guest_semaphore COMMAND guest_semaphore_tests)
+    set_tests_properties(guest_semaphore PROPERTIES TIMEOUT 20)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME guest_semaphore_trace COMMAND ${Python3_EXECUTABLE}
+            ${LIBS_INCLUDE_DIR}/tests/test_semaphore_trace.py $<TARGET_FILE:semaphore_trace_tests>)
+        set_tests_properties(guest_semaphore_trace PROPERTIES TIMEOUT 20)
+    endif()
+    if(WIN32)
+        set_tests_properties(guest_semaphore guest_semaphore_trace PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

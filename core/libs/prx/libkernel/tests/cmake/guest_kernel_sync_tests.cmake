@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_kernel_sync_tests ${LIBS_INCLUDE_DIR}/tests/GuestKernelSync.cpp)
+    target_include_directories(guest_kernel_sync_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_kernel_sync_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_kernel_sync_tests)
+    add_test(NAME guest_kernel_sync COMMAND guest_kernel_sync_tests)
+    if(WIN32)
+        set_tests_properties(guest_kernel_sync PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

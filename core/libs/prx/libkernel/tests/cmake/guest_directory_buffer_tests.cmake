@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    if(WIN32)
+        add_test_executable(guest_directory_buffer_tests ${LIBS_INCLUDE_DIR}/tests/GuestDirectoryBuffer.cpp)
+        target_include_directories(guest_directory_buffer_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_directory_buffer_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_directory_buffer_tests)
+        add_test(NAME guest_directory_buffer COMMAND guest_directory_buffer_tests)
+        set_tests_properties(guest_directory_buffer PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

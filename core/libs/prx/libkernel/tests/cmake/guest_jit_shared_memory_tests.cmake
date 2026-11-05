@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_jit_shared_memory_tests ${LIBS_INCLUDE_DIR}/tests/GuestJitSharedMemory.cpp)
+    target_include_directories(guest_jit_shared_memory_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_jit_shared_memory_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_jit_shared_memory_tests)
+    add_test(NAME guest_jit_shared_memory COMMAND guest_jit_shared_memory_tests)
+    if(WIN32)
+        set_tests_properties(guest_jit_shared_memory PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

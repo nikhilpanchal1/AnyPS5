@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_cond_timedwait_tests ${LIBS_INCLUDE_DIR}/tests/GuestCondTimedwait.cpp)
+    target_include_directories(guest_cond_timedwait_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_cond_timedwait_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_cond_timedwait_tests)
+    add_test(NAME guest_cond_timedwait COMMAND guest_cond_timedwait_tests)
+    set_tests_properties(guest_cond_timedwait PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_cond_timedwait PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

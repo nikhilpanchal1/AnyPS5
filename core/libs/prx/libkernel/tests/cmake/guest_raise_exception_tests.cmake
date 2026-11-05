@@ -1,0 +1,13 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_raise_exception_tests ${LIBS_INCLUDE_DIR}/tests/GuestRaiseException.cpp)
+    target_include_directories(guest_raise_exception_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_raise_exception_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_raise_exception_tests)
+    add_test(NAME guest_raise_exception COMMAND guest_raise_exception_tests)
+    set_tests_properties(guest_raise_exception PROPERTIES TIMEOUT 60)
+    add_asan_test_options(guest_raise_exception detect_stack_use_after_return=0)
+    if(WIN32)
+        set_tests_properties(guest_raise_exception PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

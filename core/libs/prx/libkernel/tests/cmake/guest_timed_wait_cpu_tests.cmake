@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_timed_wait_cpu_tests ${LIBS_INCLUDE_DIR}/tests/GuestTimedWaitCpu.cpp)
+    target_include_directories(guest_timed_wait_cpu_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_timed_wait_cpu_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_timed_wait_cpu_tests)
+    add_test(NAME guest_timed_wait_cpu COMMAND guest_timed_wait_cpu_tests)
+    set_tests_properties(guest_timed_wait_cpu PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(guest_timed_wait_cpu PROPERTIES RUN_SERIAL TRUE ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

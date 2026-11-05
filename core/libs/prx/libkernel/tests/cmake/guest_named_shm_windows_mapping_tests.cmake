@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    if(WIN32)
+        add_test_executable(guest_named_shm_windows_mapping_tests ${LIBS_INCLUDE_DIR}/tests/GuestNamedShmWindowsMapping.cpp)
+        target_include_directories(guest_named_shm_windows_mapping_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_named_shm_windows_mapping_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_named_shm_windows_mapping_tests)
+        add_test(NAME guest_named_shm_windows_mapping COMMAND guest_named_shm_windows_mapping_tests)
+        set_tests_properties(guest_named_shm_windows_mapping PROPERTIES TIMEOUT 20 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

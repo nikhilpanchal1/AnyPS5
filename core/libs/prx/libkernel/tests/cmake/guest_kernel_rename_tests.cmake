@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_kernel_rename_tests ${LIBS_INCLUDE_DIR}/tests/GuestKernelRename.cpp)
+    target_include_directories(guest_kernel_rename_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_kernel_rename_tests PRIVATE libkernel libc)
+    target_compile_definitions(guest_kernel_rename_tests PRIVATE KERNEL_PRX_PATH="$<TARGET_FILE:libkernel>")
+    configure_windows_unwind(guest_kernel_rename_tests)
+    add_test(NAME guest_kernel_rename COMMAND guest_kernel_rename_tests)
+    if(WIN32)
+        set_tests_properties(guest_kernel_rename PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

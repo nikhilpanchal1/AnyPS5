@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_select_wait_tests ${LIBS_INCLUDE_DIR}/tests/GuestSelectWait.cpp)
+    target_include_directories(guest_select_wait_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_select_wait_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_select_wait_tests)
+    add_test(NAME guest_select_wait COMMAND guest_select_wait_tests)
+    set_tests_properties(guest_select_wait PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_select_wait PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

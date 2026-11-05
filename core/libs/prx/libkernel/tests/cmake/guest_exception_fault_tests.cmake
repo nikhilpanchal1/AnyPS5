@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_exception_fault_tests ${LIBS_INCLUDE_DIR}/tests/GuestExceptionFault.cpp)
+    target_include_directories(guest_exception_fault_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_exception_fault_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_exception_fault_tests)
+    add_test(NAME guest_exception_fault COMMAND guest_exception_fault_tests)
+    set_tests_properties(guest_exception_fault PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(guest_exception_fault PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

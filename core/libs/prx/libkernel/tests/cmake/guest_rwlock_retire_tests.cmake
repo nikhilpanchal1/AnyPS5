@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_rwlock_retire_tests ${LIBS_INCLUDE_DIR}/tests/GuestRwlockRetire.cpp)
+    target_include_directories(guest_rwlock_retire_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_rwlock_retire_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_rwlock_retire_tests)
+    add_test(NAME guest_rwlock_retire COMMAND guest_rwlock_retire_tests)
+    set_tests_properties(guest_rwlock_retire PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_rwlock_retire PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

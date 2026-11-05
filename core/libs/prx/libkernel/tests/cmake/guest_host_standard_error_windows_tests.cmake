@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    if(WIN32)
+        add_test_executable(guest_host_standard_error_windows_tests ${LIBS_INCLUDE_DIR}/tests/GuestHostStandardErrorWindows.cpp)
+        target_include_directories(guest_host_standard_error_windows_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_host_standard_error_windows_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_host_standard_error_windows_tests)
+        add_test(NAME guest_host_standard_error_windows COMMAND guest_host_standard_error_windows_tests)
+        add_test(NAME guest_host_standard_buffering_windows COMMAND guest_host_standard_error_windows_tests --buffering)
+        set_tests_properties(guest_host_standard_error_windows guest_host_standard_buffering_windows PROPERTIES TIMEOUT 10 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_kill_tests ${LIBS_INCLUDE_DIR}/tests/GuestKill.cpp)
+    target_include_directories(guest_kill_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_kill_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_kill_tests)
+    add_test(NAME guest_kill COMMAND guest_kill_tests)
+    set_tests_properties(guest_kill PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_kill PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

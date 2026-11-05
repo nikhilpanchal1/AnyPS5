@@ -1,0 +1,13 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_poll_tests ${LIBS_INCLUDE_DIR}/tests/GuestPoll.cpp)
+    target_include_directories(guest_poll_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_poll_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_poll_tests)
+    add_test(NAME guest_poll COMMAND guest_poll_tests)
+    set_tests_properties(guest_poll PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        target_link_libraries(guest_poll_tests PRIVATE ws2_32)
+        set_tests_properties(guest_poll PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

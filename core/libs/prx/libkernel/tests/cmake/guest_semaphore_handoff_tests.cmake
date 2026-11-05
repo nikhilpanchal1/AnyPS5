@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_semaphore_handoff_tests ${LIBS_INCLUDE_DIR}/tests/GuestSemaphoreHandoff.cpp)
+    target_include_directories(guest_semaphore_handoff_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_semaphore_handoff_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_semaphore_handoff_tests)
+    add_test(NAME guest_semaphore_handoff COMMAND guest_semaphore_handoff_tests)
+    set_tests_properties(guest_semaphore_handoff PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_semaphore_handoff PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

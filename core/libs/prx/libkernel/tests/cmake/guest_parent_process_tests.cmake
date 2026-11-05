@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_parent_process_tests ${LIBS_INCLUDE_DIR}/tests/GuestParentProcess.cpp)
+    target_include_directories(guest_parent_process_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_parent_process_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_parent_process_tests)
+    add_test(NAME guest_parent_process COMMAND guest_parent_process_tests)
+    if(WIN32)
+        set_tests_properties(guest_parent_process PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

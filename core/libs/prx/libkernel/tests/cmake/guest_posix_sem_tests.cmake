@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_posix_sem_tests ${LIBS_INCLUDE_DIR}/tests/GuestPosixSem.cpp)
+    target_include_directories(guest_posix_sem_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_posix_sem_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_posix_sem_tests)
+    add_test(NAME guest_posix_sem_init COMMAND guest_posix_sem_tests init)
+    add_test(NAME guest_posix_sem_post COMMAND guest_posix_sem_tests post)
+    if(WIN32)
+        set_tests_properties(guest_posix_sem_init guest_posix_sem_post PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

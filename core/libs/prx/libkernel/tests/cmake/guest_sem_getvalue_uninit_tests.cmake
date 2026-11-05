@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_sem_getvalue_uninit_tests ${LIBS_INCLUDE_DIR}/tests/GuestSemGetvalueUninit.cpp)
+    target_include_directories(guest_sem_getvalue_uninit_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_sem_getvalue_uninit_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_sem_getvalue_uninit_tests)
+    add_test(NAME guest_sem_getvalue_uninit COMMAND guest_sem_getvalue_uninit_tests)
+    set_tests_properties(guest_sem_getvalue_uninit PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_sem_getvalue_uninit PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

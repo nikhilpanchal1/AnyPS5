@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    if(WIN32)
+        add_test_executable(guest_directory_rewind_tests ${LIBS_INCLUDE_DIR}/tests/GuestDirectoryRewind.cpp)
+        target_include_directories(guest_directory_rewind_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_directory_rewind_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_directory_rewind_tests)
+        add_test(NAME guest_directory_rewind COMMAND guest_directory_rewind_tests)
+        set_tests_properties(guest_directory_rewind PROPERTIES TIMEOUT 15 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

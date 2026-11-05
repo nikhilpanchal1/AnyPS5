@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_shm_open_tests ${LIBS_INCLUDE_DIR}/tests/GuestShmOpen.cpp)
+    target_include_directories(guest_shm_open_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_shm_open_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_shm_open_tests)
+    add_test(NAME guest_shm_open COMMAND guest_shm_open_tests)
+    if(WIN32)
+        set_tests_properties(guest_shm_open PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

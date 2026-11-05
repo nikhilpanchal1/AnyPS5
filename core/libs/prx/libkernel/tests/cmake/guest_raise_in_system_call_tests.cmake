@@ -1,0 +1,16 @@
+if(BUILD_TESTING)
+    if(WIN32)
+        add_test_executable(guest_raise_in_system_call_tests ${LIBS_INCLUDE_DIR}/tests/GuestRaiseInSystemCall.cpp)
+        target_include_directories(guest_raise_in_system_call_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_raise_in_system_call_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_raise_in_system_call_tests)
+        add_test(NAME guest_raise_in_system_call COMMAND guest_raise_in_system_call_tests)
+        set_tests_properties(guest_raise_in_system_call PROPERTIES TIMEOUT 30 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        foreach(delay IN ITEMS raise return)
+            add_test(NAME guest_raise_in_system_call_delay_${delay} COMMAND guest_raise_in_system_call_tests --delay-${delay})
+            set_tests_properties(guest_raise_in_system_call_delay_${delay} PROPERTIES TIMEOUT 30 ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        endforeach()
+    endif()
+endif()

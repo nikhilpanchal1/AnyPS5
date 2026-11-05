@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_direct_memory_for_app_tests ${LIBS_INCLUDE_DIR}/tests/GuestDirectMemoryForApp.cpp)
+    target_include_directories(guest_direct_memory_for_app_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_direct_memory_for_app_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_direct_memory_for_app_tests)
+    add_test(NAME guest_direct_memory_for_app COMMAND guest_direct_memory_for_app_tests)
+    if(WIN32)
+        set_tests_properties(guest_direct_memory_for_app PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

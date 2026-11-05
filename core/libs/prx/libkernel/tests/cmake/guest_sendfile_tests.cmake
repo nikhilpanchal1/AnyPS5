@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_sendfile_tests ${LIBS_INCLUDE_DIR}/tests/GuestSendfile.cpp)
+    target_include_directories(guest_sendfile_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_sendfile_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_sendfile_tests)
+    add_test(NAME guest_sendfile COMMAND guest_sendfile_tests)
+    set_tests_properties(guest_sendfile PROPERTIES TIMEOUT 60)
+    if(WIN32)
+        set_tests_properties(guest_sendfile PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

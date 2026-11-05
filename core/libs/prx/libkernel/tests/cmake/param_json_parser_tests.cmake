@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(param_json_parser_tests ${LIBS_INCLUDE_DIR}/tests/ParamJsonParser.cpp)
+    target_include_directories(param_json_parser_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(param_json_parser_tests PRIVATE libkernel libc)
+    configure_windows_unwind(param_json_parser_tests)
+    add_test(NAME param_json_parser COMMAND param_json_parser_tests)
+    if(WIN32)
+        set_tests_properties(param_json_parser PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

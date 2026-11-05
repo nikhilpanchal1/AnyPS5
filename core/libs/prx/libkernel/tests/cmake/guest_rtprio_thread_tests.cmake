@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_rtprio_thread_tests ${LIBS_INCLUDE_DIR}/tests/GuestRtprioThread.cpp)
+    target_include_directories(guest_rtprio_thread_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_rtprio_thread_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_rtprio_thread_tests)
+    add_test(NAME guest_rtprio_thread COMMAND guest_rtprio_thread_tests)
+    set_tests_properties(guest_rtprio_thread PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_rtprio_thread PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

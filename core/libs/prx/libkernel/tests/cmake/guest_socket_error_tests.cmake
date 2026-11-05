@@ -1,0 +1,6 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_socket_error_tests ${LIBS_INCLUDE_DIR}/tests/GuestSocketError.cpp)
+    target_include_directories(guest_socket_error_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    configure_windows_unwind(guest_socket_error_tests)
+    add_test(NAME guest_socket_error COMMAND guest_socket_error_tests)
+endif()

@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_fstatfs_tests ${LIBS_INCLUDE_DIR}/tests/GuestFstatfs.cpp)
+    target_include_directories(guest_fstatfs_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_fstatfs_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_fstatfs_tests)
+    add_test(NAME guest_fstatfs COMMAND guest_fstatfs_tests)
+    set_tests_properties(guest_fstatfs PROPERTIES TIMEOUT 15)
+    if(WIN32)
+        set_tests_properties(guest_fstatfs PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(host_cpu_tests ${LIBS_INCLUDE_DIR}/tests/HostCpu.cpp)
+    target_include_directories(host_cpu_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(host_cpu_tests PRIVATE libkernel libc)
+    configure_windows_unwind(host_cpu_tests)
+    add_test(NAME host_cpu COMMAND host_cpu_tests)
+    if(WIN32)
+        set_tests_properties(host_cpu PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

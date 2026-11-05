@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_software_version_tests ${LIBS_INCLUDE_DIR}/tests/GuestSoftwareVersion.cpp)
+    target_include_directories(guest_software_version_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_software_version_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_software_version_tests)
+    add_test(NAME guest_software_version COMMAND guest_software_version_tests)
+    if(WIN32)
+        set_tests_properties(guest_software_version PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

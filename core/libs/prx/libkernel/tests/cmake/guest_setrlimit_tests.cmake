@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_setrlimit_tests ${LIBS_INCLUDE_DIR}/tests/GuestSetrlimit.cpp)
+    target_include_directories(guest_setrlimit_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_setrlimit_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_setrlimit_tests)
+    add_test(NAME guest_setrlimit COMMAND guest_setrlimit_tests)
+    set_tests_properties(guest_setrlimit PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_setrlimit PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

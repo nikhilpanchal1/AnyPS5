@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_usleep_tests ${LIBS_INCLUDE_DIR}/tests/GuestUsleep.cpp)
+    target_include_directories(guest_usleep_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_usleep_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_usleep_tests)
+    add_test(NAME guest_usleep COMMAND guest_usleep_tests)
+    set_tests_properties(guest_usleep PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_usleep PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

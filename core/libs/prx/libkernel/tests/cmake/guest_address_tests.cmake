@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_address_tests ${LIBS_INCLUDE_DIR}/tests/GuestAddressConversion.cpp)
+    target_include_directories(guest_address_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_address_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_address_tests)
+    add_test(NAME guest_addresses COMMAND guest_address_tests)
+    if(WIN32)
+        set_tests_properties(guest_addresses PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

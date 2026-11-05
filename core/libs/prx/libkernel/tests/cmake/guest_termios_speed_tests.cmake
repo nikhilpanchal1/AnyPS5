@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_termios_speed_tests ${LIBS_INCLUDE_DIR}/tests/GuestTermiosSpeed.cpp)
+    target_include_directories(guest_termios_speed_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_termios_speed_tests PRIVATE libkernel libc ${CMAKE_DL_LIBS})
+    configure_windows_unwind(guest_termios_speed_tests)
+    add_test(NAME guest_termios_speed COMMAND guest_termios_speed_tests $<TARGET_FILE:libkernel>)
+    if(WIN32)
+        set_tests_properties(guest_termios_speed PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

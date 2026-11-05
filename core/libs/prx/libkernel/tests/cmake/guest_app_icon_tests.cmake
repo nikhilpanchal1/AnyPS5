@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_app_icon_tests ${LIBS_INCLUDE_DIR}/tests/GuestAppIcon.cpp)
+    target_include_directories(guest_app_icon_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_app_icon_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_app_icon_tests)
+    add_test(NAME guest_app_icon COMMAND guest_app_icon_tests)
+    set_tests_properties(guest_app_icon PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_app_icon PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

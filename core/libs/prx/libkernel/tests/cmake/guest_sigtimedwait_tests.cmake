@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_sigtimedwait_tests ${LIBS_INCLUDE_DIR}/tests/GuestSigtimedwait.cpp)
+    target_include_directories(guest_sigtimedwait_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_sigtimedwait_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_sigtimedwait_tests)
+    add_test(NAME guest_sigtimedwait COMMAND guest_sigtimedwait_tests)
+    if(WIN32)
+        set_tests_properties(guest_sigtimedwait PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

@@ -1,0 +1,18 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_dynamic_loader_tests ${LIBS_INCLUDE_DIR}/tests/GuestDynamicLoader.cpp)
+    target_include_directories(guest_dynamic_loader_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_dynamic_loader_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_dynamic_loader_tests)
+    add_dependencies(guest_dynamic_loader_tests guest_module_fixture)
+    set_target_properties(guest_dynamic_loader_tests PROPERTIES ENABLE_EXPORTS ON)
+    if(WIN32)
+        target_sources(guest_dynamic_loader_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/GuestDynamicLoader.def")
+    endif()
+    add_test(NAME guest_dynamic_loader COMMAND guest_dynamic_loader_tests $<TARGET_FILE_NAME:guest_module_fixture>)
+    set_tests_properties(guest_dynamic_loader PROPERTIES TIMEOUT 30
+        WORKING_DIRECTORY "$<TARGET_FILE_DIR:guest_module_fixture>" RESOURCE_LOCK guest_dynamic_loader_files)
+    if(WIN32)
+        set_tests_properties(guest_dynamic_loader PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

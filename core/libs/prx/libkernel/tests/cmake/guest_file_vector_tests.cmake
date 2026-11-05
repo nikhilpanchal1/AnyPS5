@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_file_vector_tests ${LIBS_INCLUDE_DIR}/tests/GuestFileVector.cpp)
+    target_include_directories(guest_file_vector_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_file_vector_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_file_vector_tests)
+    add_test(NAME guest_file_vector COMMAND guest_file_vector_tests)
+    if(WIN32)
+        set_tests_properties(guest_file_vector PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

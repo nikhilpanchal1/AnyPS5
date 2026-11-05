@@ -1,0 +1,13 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_getlogin_tests ${LIBS_INCLUDE_DIR}/tests/GuestGetlogin.cpp)
+    target_include_directories(guest_getlogin_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_getlogin_tests PRIVATE libkernel libkernel_sys libc)
+    configure_windows_unwind(guest_getlogin_tests)
+    add_test(NAME guest_getlogin COMMAND guest_getlogin_tests)
+    set_tests_properties(guest_getlogin PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        target_link_libraries(guest_getlogin_tests PRIVATE advapi32)
+        set_tests_properties(guest_getlogin PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_sigaltstack_tests ${LIBS_INCLUDE_DIR}/tests/GuestSigaltstack.cpp)
+    target_include_directories(guest_sigaltstack_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_sigaltstack_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_sigaltstack_tests)
+    add_test(NAME guest_sigaltstack COMMAND guest_sigaltstack_tests)
+    if(WIN32)
+        set_tests_properties(guest_sigaltstack PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

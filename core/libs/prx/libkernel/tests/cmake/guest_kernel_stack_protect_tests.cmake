@@ -1,0 +1,13 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_kernel_stack_protect_tests ${LIBS_INCLUDE_DIR}/tests/GuestKernelStackProtect.cpp)
+    target_include_directories(guest_kernel_stack_protect_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_kernel_stack_protect_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_kernel_stack_protect_tests)
+    add_test(NAME guest_kernel_stack_protect COMMAND guest_kernel_stack_protect_tests)
+    set_tests_properties(guest_kernel_stack_protect PROPERTIES TIMEOUT 20)
+    add_asan_test_options(guest_kernel_stack_protect detect_stack_use_after_return=0)
+    if(WIN32)
+        set_tests_properties(guest_kernel_stack_protect PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_nanosleep_long_request_tests ${LIBS_INCLUDE_DIR}/tests/GuestNanosleepLongRequest.cpp)
+    target_include_directories(guest_nanosleep_long_request_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_nanosleep_long_request_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_nanosleep_long_request_tests)
+    add_test(NAME guest_nanosleep_long_request COMMAND guest_nanosleep_long_request_tests)
+    set_tests_properties(guest_nanosleep_long_request PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(guest_nanosleep_long_request PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

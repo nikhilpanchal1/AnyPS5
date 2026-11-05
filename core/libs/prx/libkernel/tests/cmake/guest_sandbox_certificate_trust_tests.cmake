@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    if(WIN32)
+        add_test_executable(guest_sandbox_certificate_trust_tests ${LIBS_INCLUDE_DIR}/tests/GuestSandboxCertificateTrust.cpp)
+        target_include_directories(guest_sandbox_certificate_trust_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_sandbox_certificate_trust_tests PRIVATE libkernel libc crypt32)
+        configure_windows_unwind(guest_sandbox_certificate_trust_tests)
+        add_test(NAME guest_sandbox_certificate_trust COMMAND guest_sandbox_certificate_trust_tests)
+        set_tests_properties(guest_sandbox_certificate_trust PROPERTIES TIMEOUT 10 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

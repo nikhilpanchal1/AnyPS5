@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_signal_handler_mask_tests ${LIBS_INCLUDE_DIR}/tests/GuestSignalHandlerMask.cpp)
+    target_include_directories(guest_signal_handler_mask_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_signal_handler_mask_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_signal_handler_mask_tests)
+    add_test(NAME guest_signal_handler_mask COMMAND guest_signal_handler_mask_tests)
+    set_tests_properties(guest_signal_handler_mask PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_signal_handler_mask PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

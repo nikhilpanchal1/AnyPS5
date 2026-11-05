@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_truncate_tests ${LIBS_INCLUDE_DIR}/tests/GuestTruncate.cpp)
+    target_include_directories(guest_truncate_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_truncate_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_truncate_tests)
+    add_test(NAME guest_truncate COMMAND guest_truncate_tests)
+    set_tests_properties(guest_truncate PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_truncate PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

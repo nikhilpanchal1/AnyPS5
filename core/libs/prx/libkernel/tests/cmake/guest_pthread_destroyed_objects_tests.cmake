@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_pthread_destroyed_objects_tests ${LIBS_INCLUDE_DIR}/tests/GuestPthreadDestroyedObjects.cpp)
+    target_include_directories(guest_pthread_destroyed_objects_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_pthread_destroyed_objects_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_pthread_destroyed_objects_tests)
+    add_test(NAME guest_pthread_destroyed_objects COMMAND guest_pthread_destroyed_objects_tests)
+    set_tests_properties(guest_pthread_destroyed_objects PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_pthread_destroyed_objects PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

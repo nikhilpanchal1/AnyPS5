@@ -1,0 +1,13 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_pthread_stack_tests ${LIBS_INCLUDE_DIR}/tests/GuestPthreadStack.cpp)
+    target_include_directories(guest_pthread_stack_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_pthread_stack_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_pthread_stack_tests)
+    add_test(NAME guest_pthread_stack COMMAND guest_pthread_stack_tests)
+    set_tests_properties(guest_pthread_stack PROPERTIES TIMEOUT 20)
+    add_asan_test_options(guest_pthread_stack detect_stack_use_after_return=0)
+    if(WIN32)
+        set_tests_properties(guest_pthread_stack PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

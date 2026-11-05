@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_thread_cpu_clock_tests ${LIBS_INCLUDE_DIR}/tests/GuestThreadCpuClock.cpp)
+    target_include_directories(guest_thread_cpu_clock_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_thread_cpu_clock_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_thread_cpu_clock_tests)
+    add_test(NAME guest_thread_cpu_clock COMMAND guest_thread_cpu_clock_tests)
+    set_tests_properties(guest_thread_cpu_clock PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(guest_thread_cpu_clock PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

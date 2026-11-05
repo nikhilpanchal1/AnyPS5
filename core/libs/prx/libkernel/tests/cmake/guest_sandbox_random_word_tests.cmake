@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_sandbox_random_word_tests ${LIBS_INCLUDE_DIR}/tests/GuestSandboxRandomWord.cpp)
+    target_include_directories(guest_sandbox_random_word_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_sandbox_random_word_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_sandbox_random_word_tests)
+    add_test(NAME guest_sandbox_random_word COMMAND guest_sandbox_random_word_tests)
+    set_tests_properties(guest_sandbox_random_word PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_sandbox_random_word PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

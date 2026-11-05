@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_protection_report_tests ${LIBS_INCLUDE_DIR}/tests/GuestProtectionReport.cpp)
+    target_include_directories(guest_protection_report_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_protection_report_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_protection_report_tests)
+    add_test(NAME guest_protection_report COMMAND guest_protection_report_tests)
+    set_tests_properties(guest_protection_report PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(guest_protection_report PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

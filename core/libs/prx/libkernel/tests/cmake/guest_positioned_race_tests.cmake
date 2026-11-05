@@ -1,0 +1,11 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_positioned_race_tests ${LIBS_INCLUDE_DIR}/tests/GuestPositionedRace.cpp)
+    target_include_directories(guest_positioned_race_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_positioned_race_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_positioned_race_tests)
+    add_test(NAME guest_positioned_race COMMAND guest_positioned_race_tests)
+    if(WIN32)
+        set_tests_properties(guest_positioned_race PROPERTIES TIMEOUT 60 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

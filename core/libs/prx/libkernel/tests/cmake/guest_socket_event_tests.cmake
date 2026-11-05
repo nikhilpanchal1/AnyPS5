@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_socket_event_tests ${LIBS_INCLUDE_DIR}/tests/GuestSocketEvents.cpp)
+    target_include_directories(guest_socket_event_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_socket_event_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_socket_event_tests)
+    add_test(NAME guest_socket_events COMMAND guest_socket_event_tests)
+    set_tests_properties(guest_socket_events PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_socket_events PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

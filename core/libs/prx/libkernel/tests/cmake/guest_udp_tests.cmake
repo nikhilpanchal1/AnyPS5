@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_udp_tests ${LIBS_INCLUDE_DIR}/tests/GuestUdp.cpp)
+    target_include_directories(guest_udp_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_udp_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_udp_tests)
+    add_test(NAME guest_udp COMMAND guest_udp_tests)
+    set_tests_properties(guest_udp PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_udp PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()

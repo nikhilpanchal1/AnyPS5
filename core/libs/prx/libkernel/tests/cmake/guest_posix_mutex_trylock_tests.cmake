@@ -1,0 +1,12 @@
+if(BUILD_TESTING)
+    add_test_executable(guest_posix_mutex_trylock_tests ${LIBS_INCLUDE_DIR}/tests/GuestPosixMutexTrylock.cpp)
+    target_include_directories(guest_posix_mutex_trylock_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_posix_mutex_trylock_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_posix_mutex_trylock_tests)
+    add_test(NAME guest_posix_mutex_trylock COMMAND guest_posix_mutex_trylock_tests)
+    set_tests_properties(guest_posix_mutex_trylock PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(guest_posix_mutex_trylock PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+endif()
