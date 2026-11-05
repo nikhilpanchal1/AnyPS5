@@ -514,7 +514,7 @@ void CollectBdaAnchors(SpirvEmitterState& state) {
     }
 }
 
-void EmitBdaAnchorRange(SpirvEmitterState& state, SpirvEmitterState::BdaAnchor& anchor, std::uint32_t base) {
+void EmitBdaAnchorRange(SpirvEmitterState& state, SpirvEmitterState::BdaAnchor& anchor, std::uint32_t base, bool uniform) {
     if (state.bdaAnchorFunction == 0) throw std::runtime_error("the BDA anchor search function is missing");
     const auto u64 = TypeScalarU64(state);
     const auto boolean = TypeBool(state);
@@ -525,7 +525,7 @@ void EmitBdaAnchorRange(SpirvEmitterState& state, SpirvEmitterState::BdaAnchor& 
         return range;
     };
     const auto zero = state.module.Constant(spv::OpConstantComposite, rangeType, BdaConstant(state, 0u), BdaConstant(state, 0u), BdaConstant(state, 0u));
-    const auto range = state.requirements.subgroupBallot ? EmitElectedBdaRange(state, rangeType, zero, search) : search();
+    const auto range = uniform && state.requirements.subgroupBallot ? EmitElectedBdaRange(state, rangeType, zero, search) : search();
     const auto extract = [&](std::uint32_t component) {
         const auto value = state.module.AllocateId();
         state.module.AddFunction(spv::OpCompositeExtract, u64, value, range, component);

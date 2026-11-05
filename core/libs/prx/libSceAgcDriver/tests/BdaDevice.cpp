@@ -231,7 +231,8 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--device-selection-cpu") return 0;
         RunBdaContractTests();
         const bool importFailures = argc == 2 && std::strcmp(argv[1], "--host-import-failures") == 0;
-        if (argc == 2 && !importFailures) {
+        const bool runtimeBufferAnchors = argc == 2 && std::strcmp(argv[1], "--runtime-buffer-anchors") == 0;
+        if (argc == 2 && !importFailures && !runtimeBufferAnchors) {
             const auto shader = MakeBdaTestShader(0x7fff12340000ULL, 32);
             std::ofstream file(argv[1], std::ios::binary);
             file.write(reinterpret_cast<const char*>(shader.data()), static_cast<std::streamsize>(shader.size() * sizeof(std::uint32_t)));
@@ -252,6 +253,11 @@ int main(int argc, char** argv) {
                 return 77;
             }
             AgcDriver::Tests::RunHostImportFailureTests(device->GetContext(), true);
+            return 0;
+        }
+        if (runtimeBufferAnchors) {
+            RunBdaRuntimeBufferExecutionTests(device->GetContext());
+            std::cout << "runtime buffer anchor divergent descriptors, range boundaries, permissions, nulls and GCN masks pass\n";
             return 0;
         }
         Buffer buffer(device->GetContext(), 256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);

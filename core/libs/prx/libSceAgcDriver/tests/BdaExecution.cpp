@@ -229,6 +229,118 @@ static void RunBdaDwordWriteTests(const Context& context) {
     write(guest + 0x7c, 2, 8, static_cast<Abi::FaultReason>(0), 64);
 }
 
+void RunBdaRuntimeBufferExecutionTests(const Context& context) {
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    constexpr std::uint64_t guest = 0x123400000ULL;
+    constexpr std::uint64_t other = 0x223400000ULL;
+    constexpr std::uint64_t alias = guest | 0xf00000000000ULL;
+    constexpr std::uint32_t words = BdaRuntimeBufferInputWord + BdaRuntimeBufferLanes * 6u;
+    constexpr std::uint32_t sentinel = 0xa5a5a5a5u;
+    const auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    Buffer first(context, 96u, usage);
+    Buffer tail(context, 32u, usage);
+    Buffer distinct(context, 96u, usage);
+    Buffer maskedAlias(context, 96u, usage);
+    std::array<Buffer*, 4> data{&first, &tail, &distinct, &maskedAlias};
+    for (std::uint32_t buffer = 0u; buffer < data.size(); ++buffer) {
+        for (std::size_t byte = 0u; byte < data[buffer]->Bytes().size(); ++byte) data[buffer]->Bytes()[byte] = std::byte(static_cast<std::uint8_t>(0x13u + buffer * 0x37u + byte * 11u));
+    }
+    std::array<Abi::Range, 4> ranges{{
+        {guest, guest + 64u, first.DeviceAddress(), Abi::Read, 0u},
+        {guest + 64u, guest + 96u, tail.DeviceAddress(), Abi::Read, 0u},
+        {other, other + 96u, distinct.DeviceAddress(), Abi::Read, 0u},
+        {alias, alias + 96u, maskedAlias.DeviceAddress(), Abi::Read, 0u}
+    }};
+    Require(Abi::RangesOrdered(ranges.data(), ranges.size()), "runtime buffer anchor ranges are not ordered");
+    Buffer table(context, sizeof(Abi::Header) + sizeof(ranges), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    Buffer fault(context, Abi::FaultBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    Buffer output(context, words * sizeof(std::uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    for (const bool gcn : {false, true}) {
+        for (std::uint32_t mode = 0u; mode < 4u; ++mode) {
+            const bool coherent = (mode & 1u) != 0u;
+            const bool scalar = (mode & 2u) != 0u;
+            std::fprintf(stderr, "runtime buffer anchors: %s %s%s pipeline\n", gcn ? "GCN" : "RDNA", scalar ? "scalar" : "vector", coherent ? " glc" : "");
+            const auto shader = MakeBdaRuntimeBufferReadTestShader(coherent, gcn, scalar);
+            Pipeline pipeline(context, shader, {&table, &fault, &output});
+            for (std::uint32_t test = 0u; test < 12u; ++test) {
+                if (test == 8u && !gcn) continue;
+                auto mapped = ranges;
+                if (test == 5u) mapped[2].permissions = 0u;
+                if (test == 11u) mapped[0].end = guest + 96u;
+                const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(mapped.size()), sizeof(Abi::Range), 0u};
+                std::memcpy(table.Bytes().data(), &header, sizeof(header));
+                std::memcpy(table.Bytes().data() + sizeof(header), mapped.data(), sizeof(mapped));
+                std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
+                std::vector<std::uint32_t> expected(words, sentinel);
+                auto firstReason = static_cast<Abi::FaultReason>(0u);
+                std::uint64_t faultAddress = 0u;
+                const auto cpuByte = [&](std::uint64_t address) {
+                    for (std::size_t index = mapped.size(); index > 0u; --index) {
+                        const auto range = index - 1u;
+                        if (address < mapped[range].begin || address >= mapped[range].end) continue;
+                        if ((mapped[range].permissions & Abi::Read) == 0u) {
+                            if (static_cast<std::uint32_t>(firstReason) == 0u) { firstReason = Abi::FaultReason::Permission; faultAddress = address; }
+                            return 0u;
+                        }
+                        return static_cast<std::uint32_t>(data[range]->Bytes()[address - mapped[range].begin]);
+                    }
+                    if (static_cast<std::uint32_t>(firstReason) == 0u) { firstReason = Abi::FaultReason::Unmapped; faultAddress = address; }
+                    return 0u;
+                };
+                for (std::uint32_t lane = 0u; lane < BdaRuntimeBufferLanes; ++lane) {
+                    auto base = test == 0u && lane % 2u != 0u ? other : guest;
+                    auto offset = test == 0u ? lane % 8u * 4u : 0u;
+                    auto records = 256u;
+                    bool active = true;
+                    bool valid = true;
+                    if (test == 1u) offset = 60u;
+                    if (test == 2u) offset = 61u;
+                    if (test == 3u) { base -= 16u; offset = 16u; }
+                    if (test == 4u) offset = 96u;
+                    if (test == 5u) base = other;
+                    if (test == 6u) { records = scalar ? 7u : 8u; offset = scalar ? 1u : 4u; }
+                    if (test == 7u) { active = false; valid = false; }
+                    if (test == 8u) base = alias;
+                    if (test == 9u) valid = false;
+                    if (test == 10u) base = 0u;
+                    if (test == 11u) offset = 60u;
+                    const auto slot = BdaRuntimeBufferInputWord + lane * 6u;
+                    expected[slot] = static_cast<std::uint32_t>(base);
+                    expected[slot + 1u] = static_cast<std::uint32_t>(base >> 32u);
+                    expected[slot + 2u] = records;
+                    expected[slot + 3u] = valid ? (gcn ? 0x00027facu : 0x31016facu) : 0xffffffffu;
+                    expected[slot + 4u] = offset;
+                    expected[slot + 5u] = active ? 1u : 0u;
+                    if (gcn) base &= 0xfffffffffffULL;
+                    if (scalar) { active = true; valid = true; }
+                    if (active && !valid && static_cast<std::uint32_t>(firstReason) == 0u) { firstReason = Abi::FaultReason::InvalidDescriptor; faultAddress = base; }
+                    for (std::uint32_t component = 0u; component < 2u; ++component) {
+                        std::uint32_t value = 0u;
+                        const auto at = scalar ? (offset + component * 4u) & ~3u : offset + component * 4u;
+                        if (active && valid && base != 0u && at + 4u <= records) {
+                            for (std::uint32_t byte = 0u; byte < 4u; ++byte) value |= cpuByte(base + at + byte) << (byte * 8u);
+                        }
+                        expected[lane * 8u + component] = value;
+                    }
+                }
+                std::vector<std::uint32_t> initial(words, sentinel);
+                std::copy(expected.begin() + BdaRuntimeBufferInputWord, expected.end(), initial.begin() + BdaRuntimeBufferInputWord);
+                std::memcpy(output.Bytes().data(), initial.data(), output.Bytes().size());
+                pipeline.Run(1u);
+                std::vector<std::uint32_t> actual(words);
+                std::memcpy(actual.data(), output.Bytes().data(), output.Bytes().size());
+                const auto name = std::string("runtime buffer anchors: ") + (gcn ? "GCN " : "RDNA ") + (coherent ? "glc " : "") + (scalar ? "scalar " : "vector ") + "case " + std::to_string(test);
+                for (std::uint32_t word = 0u; word < words; ++word) Require(actual[word] == expected[word], name + " word " + std::to_string(word) + " is " + Hex(actual[word]) + ", expected " + Hex(expected[word]));
+                Abi::Fault report{};
+                std::memcpy(&report, fault.Bytes().data(), sizeof(report));
+                if (static_cast<std::uint32_t>(firstReason) == 0u) Require(report.state == Abi::FaultState::Empty, name + " published a fault");
+                else Require(report.state == Abi::FaultState::Ready && report.reason == firstReason && report.address == faultAddress && report.bytes == (firstReason == Abi::FaultReason::InvalidDescriptor ? 0u : 1u) && report.instruction == 0x1234u, name + " did not publish its exact first fault");
+            }
+            std::fprintf(stderr, "runtime buffer anchors: %s %s%s passed\n", gcn ? "GCN" : "RDNA", scalar ? "scalar" : "vector", coherent ? " glc" : "");
+        }
+    }
+}
+
 static void RunBdaAnchorTests(const Context& context) {
     namespace Abi = ShaderRecompiler::BdaAbi;
     constexpr std::uint64_t guest = 0x7fff12340001ULL;

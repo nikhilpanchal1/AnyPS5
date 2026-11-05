@@ -31,6 +31,10 @@ struct BdaAnchoredReadProgram {
 };
 inline constexpr std::uint32_t BdaAnchoredReadSentinel = 0xdeadbeefu;
 std::vector<std::uint32_t> MakeBdaAnchoredReadTestShader(const BdaAnchoredReadProgram& reads, bool anchored);
+inline constexpr std::uint32_t BdaRuntimeBufferLanes = 8u;
+inline constexpr std::uint32_t BdaRuntimeBufferInputWord = 1024u;
+std::vector<std::uint32_t> MakeBdaRuntimeBufferReadTestShader(bool coherent, bool gcn, bool scalar);
+void RunBdaRuntimeBufferExecutionTests(const AgcDriver::Graphics::Context& context);
 void RunBdaStoreExecutionTests(const AgcDriver::Graphics::Context& context);
 void RunBdaFaultSlotExecutionTests(const AgcDriver::Graphics::Context& context);
 void RunBdaExecutionTests(const AgcDriver::Graphics::Context& context);

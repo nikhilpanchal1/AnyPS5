@@ -218,6 +218,15 @@ struct SpirvEmitterState {
     std::uint32_t loopGuardPc = 0;
     std::uint32_t srgbTableVariable = 0;
     std::uint32_t gcnBufferFormatFunction = 0;
+    struct RuntimeBufferAnchor {
+        std::array<std::uint32_t, 4> descriptor{};
+        std::uint32_t label = 0;
+        std::uint32_t laneHalf = 0;
+        BdaAnchor range;
+    };
+    std::vector<RuntimeBufferAnchor> runtimeBufferAnchors;
+    const IrBlock* runtimeBufferReadBlock = nullptr;
+    std::map<std::array<std::uint32_t, 4>, std::uint32_t> runtimeBufferReadDwords;
     std::uint32_t gdsVariable = 0;
     std::uint32_t gdsLength = 0;
     std::uint32_t pushConstantVariable = 0;

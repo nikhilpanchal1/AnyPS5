@@ -10259,6 +10259,102 @@ void verifyBdaAnchors() {
     }
 }
 
+void verifyRuntimeBufferAnchors() {
+    using namespace ShaderRecompiler;
+    for (const bool coherent : {false, true}) {
+        for (const bool distinct : {false, true}) {
+            IrProgram program;
+            program.SetWaveSize(32u);
+            program.Resources().stage = IrShaderStage::Compute;
+            program.Resources().srtPlanComplete = true;
+            program.Resources().resourceTrackingComplete = true;
+            program.Metadata().shaderInfoComplete = true;
+            program.Metadata().bindingLayoutComplete = true;
+            program.Info().usesDma = true;
+            program.Info().usesFaultBuffer = true;
+            auto& block = program.CreateBlock();
+            program.SetEntryBlock(block);
+            program.BlockOrder().push_back(&block);
+            program.Metadata().blockInfo.emplace_back();
+            IrBuilder builder(program);
+            builder.SetInsertionPoint(block);
+            auto& lane = builder.Emit(IrOpcode::LaneId, IrType::U32, {});
+            auto& active = program.CreateValue(IrOpcode::Void, IrType::U1);
+            active.SetImmediateBool(true);
+            static_cast<void>(builder.Emit(IrOpcode::Ballot, IrType::U32x4, {&active}));
+            auto& zero = builder.Constant(0u);
+            auto& base = builder.Emit(IrOpcode::IAdd32, IrType::U32, {&lane, &builder.Constant(0x10000000u)});
+            auto& handle = builder.Emit(IrOpcode::GetBufferResource, IrType::BufferResource, {&base, &zero, &builder.Constant(4096u), &builder.Constant(0x31016facu)});
+            MemoryInfo memory{};
+            memory.kind = ResourceKind::Buffer;
+            memory.gpuDescriptor = true;
+            memory.dataBits = 32u;
+            memory.coherent = coherent;
+            constexpr std::array<IrOpcode, 4> opcodes{IrOpcode::LoadBufferU32, IrOpcode::LoadBufferU32x2, IrOpcode::LoadBufferU32x3, IrOpcode::LoadBufferU32x4};
+            constexpr std::array<IrType, 4> types{IrType::U32, IrType::U32x2, IrType::U32x3, IrType::U32x4};
+            for (std::uint32_t load = 0u; load < opcodes.size(); ++load) {
+                IrValue* selected = &handle;
+                if (distinct && load != 0u) {
+                    auto& next = builder.Emit(IrOpcode::IAdd32, IrType::U32, {&base, &builder.Constant(load * 256u)});
+                    selected = &builder.Emit(IrOpcode::GetBufferResource, IrType::BufferResource, {&next, &zero, &builder.Constant(4096u), &builder.Constant(0x31016facu)});
+                }
+                memory.dataDwords = load + 1u;
+                program.Resources().memoryInfo.push_back(memory);
+                static_cast<void>(builder.Emit(opcodes[load], types[load], {selected, &zero, &builder.Constant(load * 32u), &zero, &active}, MemoryFlags{load, load * 4u}));
+            }
+            program.Metadata().bindings.descriptors = {{DescriptorBindingKind::BdaPagetable, {}}, {DescriptorBindingKind::FaultBuffer, {}}};
+            ShaderComputeInputInfo compute{};
+            compute.threadsNum[0] = 32u;
+            compute.threadsNum[1] = 1u;
+            compute.threadsNum[2] = 1u;
+            compute.hostSubgroupSize = 32u;
+            compute.waveSize = 32u;
+            ShaderStageInputInfo inputs{};
+            inputs.compute = &compute;
+            CompiledBindingLayout bindings{};
+            bindings.layout = program.Metadata().bindings;
+            const std::array<std::uint32_t, 6> capabilities{spv::CapabilityShader, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess, spv::CapabilityGroupNonUniform, spv::CapabilityGroupNonUniformBallot};
+            const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+            SpirvTargetOptions target{};
+            target.vulkanVersion = 0x00401000u;
+            target.spirvVersion = 0x00010300u;
+            target.subgroupSize = 32u;
+            target.bdaAbiVersion = BdaAbi::Version;
+            target.supportedCapabilities = capabilities;
+            target.supportedExtensions = extensions;
+            const auto words = SpirvEmitter().Emit(program, inputs, bindings, target);
+#if ANYPS5_ENABLE_SPIRV_TOOLS
+            static_cast<void>(ValidateAndOptimizeSpirv(words, target.vulkanVersion, target.spirvVersion, false, false));
+#endif
+            std::map<std::uint32_t, std::string> names;
+            std::string function;
+            std::uint32_t anchors = 0u;
+            std::uint32_t fallbacks = 0u;
+            std::uint32_t direct = 0u;
+            for (std::size_t cursor = 5u; cursor < words.size();) {
+                const auto count = words[cursor] >> 16u;
+                require(count != 0u && count <= words.size() - cursor, "runtime buffer anchors: truncated SPIR-V instruction");
+                const auto opcode = words[cursor] & 0xffffu;
+                if (opcode == spv::OpName) names[words[cursor + 1u]] = reinterpret_cast<const char*>(&words[cursor + 2u]);
+                if (opcode == spv::OpFunction) function = names[words[cursor + 2u]];
+                if (function == "main") {
+                    if (opcode == spv::OpFunctionCall) {
+                        const auto& callee = names[words[cursor + 3u]];
+                        if (callee == "bda_anchor_range") ++anchors;
+                        if (callee.starts_with("read_bda_span")) ++fallbacks;
+                    }
+                    if (opcode == spv::OpConvertUToPtr) ++direct;
+                    require(opcode != spv::OpGroupNonUniformElect && opcode != spv::OpGroupNonUniformBroadcastFirst, "runtime buffer anchors: a lane's descriptor range was broadcast to other lanes");
+                }
+                cursor += count;
+            }
+            require(anchors == (distinct ? 3u : 1u), "runtime buffer anchors: repeated V#s do not share one range, or distinct V#s share a range");
+            require(fallbacks == 10u, "runtime buffer anchors: a component lost its span fallback");
+            require(direct == (distinct ? 9u : 10u), "runtime buffer anchors: a profitable component does not have a direct physical read");
+        }
+    }
+}
+
 void verifyFunctionLdsBound() {
     using namespace ShaderRecompiler;
     const auto build = [](const auto& body) {
@@ -11504,6 +11600,11 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--specialized-bda-abi") {
             verifySpecializedBufferAtomicBindings(true);
             std::cout << "Specialized programs retain the BDA ABI only while a fault buffer remains\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--runtime-buffer-anchors") {
+            verifyRuntimeBufferAnchors();
+            std::cout << "Runtime V# reads share per-lane BDA ranges and retain span fallbacks\n";
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--quad-mask-no-demote") {

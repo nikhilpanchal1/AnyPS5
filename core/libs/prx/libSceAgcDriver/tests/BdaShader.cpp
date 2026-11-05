@@ -1,5 +1,7 @@
 #include "BdaShader.hpp"
 #include "SpirvBackend/SpirvBda.hpp"
+#include "SpirvBackend/SpirvRuntimeBuffer.hpp"
+#include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvTypes.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvConstants.hpp"
 #include "IntermediateRepresentation/IrBuilder.hpp"
@@ -231,4 +233,100 @@ std::vector<std::uint32_t> MakeBdaAnchoredReadTestShader(const BdaAnchoredReadPr
     state.module.AddExecutionMode(main, spv::ExecutionModeLocalSize, reads.lanes, 1u, 1u);
     state.module.EmitEntryPoint(spv::ExecutionModelGLCompute, main, "main", interfaceVariables);
     return state.module.Finalize();
+}
+
+std::vector<std::uint32_t> MakeBdaRuntimeBufferReadTestShader(bool coherent, bool gcn, bool scalar) {
+    using namespace ShaderRecompiler;
+    struct RestoreGcn {
+        bool previous = GcnGuestShaders();
+        ~RestoreGcn() { SetGcnGuestShaders(previous); }
+    } restore;
+    SetGcnGuestShaders(gcn);
+    IrProgram program;
+    program.Resources().stage = IrShaderStage::Compute;
+    program.Info().usesDma = true;
+    auto& block = program.CreateBlock();
+    program.SetEntryBlock(block);
+    program.BlockOrder().push_back(&block);
+    IrBuilder ir(program);
+    auto& handle = program.CreateValue(IrOpcode::GetBufferResource, IrType::BufferResource);
+    std::array<IrValue*, 6> inputs{};
+    for (auto& input : inputs) input = &program.CreateValue(IrOpcode::Void, IrType::U32);
+    for (std::uint32_t word = 0u; word < 4u; ++word) handle.AddArgument(inputs[word]);
+    std::array<IrValue*, 2> instructions{};
+    for (std::uint32_t index = 0u; index < instructions.size(); ++index) {
+        MemoryInfo memory;
+        memory.kind = scalar ? ResourceKind::ScalarBuffer : ResourceKind::Buffer;
+        memory.gpuDescriptor = true;
+        memory.coherent = coherent;
+        memory.dataDwords = 1u;
+        memory.offset = index * 4u;
+        program.Resources().memoryInfo.push_back(memory);
+        auto& instruction = program.CreateValue(scalar ? IrOpcode::ReadConstBuffer : IrOpcode::LoadBufferU32, IrType::U32);
+        instruction.SetFlags(MemoryFlags{index, 0x1234u + index * 4u});
+        instruction.AddArgument(&handle);
+        if (scalar) instruction.AddArgument(inputs[4]);
+        else {
+            instruction.AddArgument(&ir.Constant(0u));
+            instruction.AddArgument(inputs[4]);
+            instruction.AddArgument(&ir.Constant(0u));
+            instruction.AddArgument(inputs[5]);
+        }
+        block.AppendInstruction(&instruction);
+        instructions[index] = &instruction;
+    }
+    SpirvEmitterState state(program, {});
+    EmitBaseHeader(state.module, program);
+    state.module.EmitCapability(spv::CapabilityGroupNonUniform);
+    state.module.EmitCapability(spv::CapabilityGroupNonUniformBallot);
+    state.requirements.subgroupBallot = true;
+    static constexpr std::array<std::uint32_t, 1> capabilities{spv::CapabilityInt64};
+    state.supportedCapabilities = capabilities;
+    const auto define = [&](std::uint32_t binding) {
+        const auto variable = state.module.DefineGlobalVariable(TypeStorageBufferPointer(state), spv::StorageClassStorageBuffer);
+        state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationDescriptorSet, 0u);
+        state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBinding, binding);
+        return variable;
+    };
+    state.bdaPagetableVariable = define(0u);
+    state.faultBufferVariable = define(1u);
+    const auto output = define(2u);
+    const auto localIndex = state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassInput, TypeU32(state)), spv::StorageClassInput);
+    state.module.AddAnnotation(spv::OpDecorate, localIndex, spv::DecorationBuiltIn, spv::BuiltInLocalInvocationIndex);
+    SpirvInputBinding local{};
+    local.kind = StageInputKind::LocalInvocationIndex;
+    local.variableId = localIndex;
+    state.inputs.push_back(local);
+    state.bdaStopsInvocations = false;
+    DefineGetBdaPointer(state);
+    const auto main = state.module.AllocateId();
+    state.module.AddFunction(spv::OpFunction, TypeVoid(state), main, spv::FunctionControlMaskNone, TypeFunction(state));
+    EmitLabel(state, state.module.AllocateId());
+    state.currentBlock = &block;
+    SpirvValueEmitContext ctx(state);
+    const auto u32 = TypeU32(state);
+    const auto lane = state.module.AllocateId();
+    state.module.AddFunction(spv::OpLoad, u32, lane, localIndex);
+    const auto inputBase = Binary(state, spv::OpIAdd, u32, ConstantU32(state, BdaRuntimeBufferInputWord), Binary(state, spv::OpIMul, u32, lane, ConstantU32(state, 6u)));
+    for (std::uint32_t word = 0u; word < inputs.size(); ++word) {
+        const auto loaded = state.module.AllocateId();
+        state.module.AddFunction(spv::OpLoad, u32, loaded, BdaWord(state, output, Binary(state, spv::OpIAdd, u32, inputBase, ConstantU32(state, word))));
+        ctx.Define(*inputs[word], word == 5u ? Binary(state, spv::OpINotEqual, TypeBool(state), loaded, ConstantU32(state, 0u)) : loaded);
+    }
+    const auto outputBase = Binary(state, spv::OpIMul, u32, lane, ConstantU32(state, 8u));
+    for (std::uint32_t index = 0u; index < instructions.size(); ++index) {
+        const auto value = scalar ? EmitRuntimeScalarBufferLoad(ctx, *instructions[index]) : EmitRuntimeBufferLoad(ctx, *instructions[index], 1u);
+        const auto word = Binary(state, spv::OpIAdd, u32, outputBase, ConstantU32(state, index));
+        state.module.AddFunction(spv::OpStore, BdaWord(state, output, word), value);
+    }
+    state.module.AddFunction(spv::OpReturn);
+    state.module.AddFunction(spv::OpFunctionEnd);
+    state.module.AddExecutionMode(main, spv::ExecutionModeLocalSize, BdaRuntimeBufferLanes, 1u, 1u);
+    const std::vector<std::uint32_t> interfaceVariables{localIndex};
+    state.module.EmitEntryPoint(spv::ExecutionModelGLCompute, main, "main", interfaceVariables);
+    auto shader = state.module.Finalize();
+#if ANYPS5_ENABLE_SPIRV_TOOLS
+    shader = ValidateAndOptimizeSpirv(shader, VK_API_VERSION_1_1, shader[1], false, false);
+#endif
+    return shader;
 }
