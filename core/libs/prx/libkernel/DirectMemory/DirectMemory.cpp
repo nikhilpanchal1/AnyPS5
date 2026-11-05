@@ -1,4 +1,5 @@
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include "prx/libc/include/General.hpp"
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
@@ -13,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <cwctype>
 #include <memory>
 #include <new>
@@ -119,10 +121,11 @@ static void* mmap(void* addr, size_t len, int prot, int flags, int, int) {
     return mmap_aligned(len, prot, PS5_PAGE_SIZE);
 }
 
-static int munmap(void* addr, size_t len) {
+static int munmap(void* addr, size_t len, void (*committed)(void*) noexcept = nullptr, void* context = nullptr) {
     auto& arena = KernelArena::Get();
     if (arena.Contains(addr, len)) GuestArena::GuestArenaReset_nid_postfix(addr, len);
     else if (!VirtualFree(addr, len, MEM_DECOMMIT)) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "VirtualFree decommit failed");
+    if (committed) committed(context);
     if (arena.Contains(addr, len)) arena.Release(addr, len);
     return 0;
 }
@@ -537,6 +540,10 @@ struct ProtectedRange {
     int prot;
 };
 
+struct FlexibleMapping {
+    std::uintptr_t end;
+};
+
 struct DirectMemoryState {
 #if defined(__linux__)
     std::vector<bool> physicalUsed = std::vector<bool>(DIRECT_MEMORY_SIZE / PS5_PAGE_SIZE);
@@ -546,6 +553,7 @@ struct DirectMemoryState {
     std::map<std::uint64_t, PhysicalBlock> physBlocks;
     std::map<std::uint64_t, PhysicalPage> physPages;
     std::map<std::uintptr_t, DirectMapping> directMappings;
+    std::map<std::uintptr_t, FlexibleMapping> flexibleMappings;
     std::mutex protectionLock;
     std::map<std::uintptr_t, ProtectedRange> protections;
     std::mutex reservationLock;
@@ -565,6 +573,7 @@ auto& g_directLock = MemoryState().directLock;
 auto& g_physBlocks = MemoryState().physBlocks;
 auto& g_physPages = MemoryState().physPages;
 auto& g_directMappings = MemoryState().directMappings;
+auto& g_flexibleMappings = MemoryState().flexibleMappings;
 auto& g_physicalSpans = MemoryState().physicalSpans;
 auto& g_protectionLock = MemoryState().protectionLock;
 auto& g_protections = MemoryState().protections;
@@ -627,6 +636,36 @@ std::vector<std::uintptr_t> MappingsSharingPhys(std::uint64_t first, std::uint64
     std::sort(bases.begin(), bases.end());
     bases.erase(std::unique(bases.begin(), bases.end()), bases.end());
     return bases;
+}
+
+class FlexibleMappingPatch {
+    std::vector<std::uintptr_t> erased;
+    std::map<std::uintptr_t, FlexibleMapping> inserted;
+
+public:
+    FlexibleMappingPatch(std::uintptr_t start, std::uintptr_t end) {
+        auto it = g_flexibleMappings.lower_bound(start);
+        if (it != g_flexibleMappings.begin() && std::prev(it)->second.end > start) --it;
+        for (; it != g_flexibleMappings.end() && it->first < end; ++it) {
+            const auto base = it->first;
+            const auto mapping = it->second;
+            erased.push_back(base);
+            if (base < start) inserted.emplace(base, FlexibleMapping{start});
+            if (mapping.end > end) inserted.emplace(end, FlexibleMapping{mapping.end});
+        }
+    }
+
+    void Commit() noexcept {
+        for (const auto address : erased) g_flexibleMappings.erase(address);
+        g_flexibleMappings.merge(inserted);
+    }
+};
+
+bool OverlapsFlexibleMapping(std::uintptr_t start, std::uintptr_t end) {
+    std::lock_guard lock(g_directLock);
+    auto it = g_flexibleMappings.lower_bound(start);
+    if (it != g_flexibleMappings.begin() && std::prev(it)->second.end > start) --it;
+    return it != g_flexibleMappings.end() && it->first < end;
 }
 
 void EraseMappings(std::uintptr_t start, std::uintptr_t end) {
@@ -812,8 +851,12 @@ void AddMapping(std::uintptr_t address, std::size_t len, std::uint64_t phys, int
     for (auto cursor = phys; cursor < last; ++it) {
         const auto runEnd = std::min(last, it->second.end);
         const auto bytes = static_cast<std::size_t>(runEnd - cursor);
-        it->second.backing->Map(address + (cursor - phys), bytes, cursor - it->second.base, nativeProt);
-        if (records) InsertMapping(address + (cursor - phys), DirectMapping{address + (cursor - phys) + bytes, cursor, it->second.backing->MemoryType(), nativeProt, it->second.backing});
+        const auto mapped = address + (cursor - phys);
+        std::optional<FlexibleMappingPatch> flexible;
+        if (records) flexible.emplace(mapped, mapped + bytes);
+        it->second.backing->Map(mapped, bytes, cursor - it->second.base, nativeProt);
+        if (flexible) flexible->Commit();
+        if (records) InsertMapping(mapped, DirectMapping{mapped + bytes, cursor, it->second.backing->MemoryType(), nativeProt, it->second.backing});
         cursor = runEnd;
     }
 #if defined(__linux__) || defined(__APPLE__)
@@ -853,7 +896,7 @@ void RequireAliasesUnpinned(GuestAllocations::Mutation& mutation, std::uint64_t 
 #endif
 }
 
-bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, size_t len, int prot, int flags, int64_t physStart = -1, [[maybe_unused]] bool zero = false) {
+bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, size_t len, int prot, int flags, int64_t physStart = -1, [[maybe_unused]] bool zero = false, const std::function<void()>& onMappedLocked = {}) {
     constexpr int GuestMapFixed = 0x10;
     constexpr int GuestMapNoOverwrite = 0x80;
     if (addr == nullptr || (flags & GuestMapFixed) == 0 || (flags & GuestMapNoOverwrite) != 0 || !mutation.Covers(addr, len)) return false;
@@ -874,18 +917,28 @@ bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, 
             }
             AddMapping(address, len, phys, nativeProtection);
         } else {
+            FlexibleMappingPatch flexible(address, address + len);
             EraseMappings(address, address + len);
 #ifdef _WIN32
-            if (zero) GuestArena::GuestArenaMapZero_nid_postfix(addr, len);
+            if (zero) {
+                GuestArena::GuestArenaMapZero_nid_postfix(addr, len);
+                flexible.Commit();
+            }
             else {
                 GuestArena::GuestArenaReset_nid_postfix(addr, len);
+                flexible.Commit();
                 if (nativeProtection != PROT_NONE) CommitArenaRange(addr, len, WinProtFromPosix(nativeProtection));
             }
 #elif defined(__EMSCRIPTEN__)
             GuestArena::GuestArenaReset_nid_postfix(addr, len);
+            flexible.Commit();
             GuestArena::GuestArenaCommit_nid_postfix(addr, len, 0x04, PS5_PAGE_SIZE);
 #else
             if (::mmap(addr, len, nativeProtection, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "remap anonymous memory");
+            flexible.Commit();
+#endif
+            if (onMappedLocked) onMappedLocked();
+#if defined(__linux__) || defined(__APPLE__)
             GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(addr, len);
 #endif
         }
@@ -912,16 +965,20 @@ void ArenaForget(void* addr, size_t len) {
 }
 #endif
 
-void Unmap(void* addr, size_t len) {
+void Unmap(void* addr, size_t len, void (*committed)(void*) noexcept = nullptr, void* context = nullptr) {
 #if defined(__linux__) || defined(__EMSCRIPTEN__) || defined(__APPLE__)
     if (ArenaAvailable() && GuestArena::GuestArenaContains_nid_postfix(addr, len))
         GuestArena::GuestArenaReset_nid_postfix(addr, len);
     else if (munmap(addr, len) != 0) throw std::system_error(errno, std::generic_category(), "munmap failed");
+    if (committed) committed(context);
     ArenaForget(addr, len);
     GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(addr, len);
 #else
-    if (KernelArena::Get().Contains(addr, len)) munmap(addr, len);
-    else munmap_release(addr);
+    if (KernelArena::Get().Contains(addr, len)) munmap(addr, len, committed, context);
+    else {
+        munmap_release(addr);
+        if (committed) committed(context);
+    }
 #endif
 }
 
@@ -1109,6 +1166,20 @@ void ValidateOutput(void** addr) {
 
 }
 
+extern "C" bool HasFlexibleMapping_nid_no_patch(const void* addr, size_t len) {
+    const auto address = reinterpret_cast<std::uintptr_t>(addr);
+    constexpr auto pageMask = static_cast<std::uintptr_t>(PS5_PAGE_SIZE - 1);
+    const auto limit = std::numeric_limits<std::uintptr_t>::max();
+    if (address == 0 || len == 0 || len > limit - address || address + len > limit - pageMask) throw std::invalid_argument("Invalid guest memory protection range");
+    auto first = address & ~pageMask;
+    auto end = (address + len + pageMask) & ~pageMask;
+#ifdef __APPLE__
+    GuestAllocations::GuestAllocationsGuestPages_nid_postfix(address, len, PS5_PAGE_SIZE, &first, &end);
+#endif
+    return OverlapsFlexibleMapping(first, end);
+}
+
+
 bool Reserved(const void* addr, size_t len) {
     const auto start = reinterpret_cast<std::uintptr_t>(addr);
     const auto end = start + len;
@@ -1128,13 +1199,15 @@ void UnmapRegistered(GuestAllocations::Mutation& mutation, void* addr, size_t le
     mutation.Unmap(addr, len, [&](const void* piece, std::size_t pieceBytes, const void* allocation, bool last) {
         auto* pieceAddress = const_cast<void*>(piece);
         std::lock_guard lock(g_directLock);
+        FlexibleMappingPatch flexible(reinterpret_cast<std::uintptr_t>(piece), reinterpret_cast<std::uintptr_t>(piece) + pieceBytes);
         EraseMappings(reinterpret_cast<std::uintptr_t>(piece), reinterpret_cast<std::uintptr_t>(piece) + pieceBytes);
 #if defined(__linux__) || defined(__EMSCRIPTEN__) || defined(__APPLE__)
-        Unmap(pieceAddress, pieceBytes);
+        Unmap(pieceAddress, pieceBytes, [](void* patch) noexcept { static_cast<FlexibleMappingPatch*>(patch)->Commit(); }, &flexible);
 #else
-        if (KernelArena::Get().Contains(pieceAddress, pieceBytes)) munmap(pieceAddress, pieceBytes);
-        else if (last) munmap_release(const_cast<void*>(allocation));
-        else munmap(pieceAddress, pieceBytes);
+        if (!KernelArena::Get().Contains(pieceAddress, pieceBytes) && last) {
+            munmap_release(const_cast<void*>(allocation));
+            flexible.Commit();
+        } else munmap(pieceAddress, pieceBytes, [](void* patch) noexcept { static_cast<FlexibleMappingPatch*>(patch)->Commit(); }, &flexible);
 #endif
     });
     EraseReservations(addr, len);
@@ -1199,14 +1272,25 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
     return 0;
 }
 
-static int MapAnonymous(void** addr, size_t len, int prot, int flags, size_t alignment, bool exclusive, bool zero) {
+static int MapAnonymous(void** addr, size_t len, int prot, int flags, size_t alignment, bool exclusive, bool zero, bool flexible = false, void** mappedOutput = nullptr) {
+    std::map<std::uintptr_t, FlexibleMapping> pending;
+    if (flexible) pending.emplace(0, FlexibleMapping{len});
+    const auto recordFlexibleLocked = [&](void* mapped) {
+        if (pending.empty()) return;
+        auto node = pending.extract(pending.begin());
+        node.key() = reinterpret_cast<std::uintptr_t>(mapped);
+        node.mapped().end += node.key();
+        if (!g_flexibleMappings.insert(std::move(node)).inserted) throw std::runtime_error("overlapping flexible mapping");
+    };
     GuestAllocations::Mutation mutation;
     if (exclusive && mutation.Overlaps(*addr, len)) return SCE_KERNEL_ERROR_ENOMEM;
     flags = PlaceHintInReservation(*addr, len, flags);
     if (FixedNoOverwriteConflict(mutation, *addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
-    if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags, -1, zero)) {
-        EraseReservations(*addr, len);
-        RecordProtection(*addr, len, prot);
+    void* const target = *addr;
+    if (RemapFixedIntoRegistered(mutation, target, len, prot, flags, -1, zero, [&] { recordFlexibleLocked(target); })) {
+        if (mappedOutput) *mappedOutput = target;
+        EraseReservations(target, len);
+        RecordProtection(target, len, prot);
         return 0;
     }
     ReplaceFixedOverlap(mutation, *addr, len, flags);
@@ -1216,16 +1300,28 @@ static int MapAnonymous(void** addr, size_t len, int prot, int flags, size_t ali
         if (zero) GuestArena::GuestArenaMapZero_nid_postfix(mapped, len);
 #endif
         mutation.Add(mapped, len, (prot & 3) != 0, (prot & 2) != 0, (prot & GuestProtGpuReadWrite) != 0);
+        {
+            std::lock_guard lock(g_directLock);
+            recordFlexibleLocked(mapped);
+        }
         if ((prot & GuestProtGpuReadWrite) != 0) mutation.NoteGpuMapping(mapped, len);
     } catch (...) {
-        Unmap(mapped, len);
+        std::lock_guard lock(g_directLock);
+        Unmap(mapped, len, [](void* pointer) noexcept { g_flexibleMappings.erase(reinterpret_cast<std::uintptr_t>(pointer)); }, mapped);
         throw;
     }
     *addr = mapped;
+    if (mappedOutput) *mappedOutput = mapped;
     EraseReservations(mapped, len);
     RecordProtection(mapped, len, prot);
     Trace("map anon %p+0x%zx prot=0x%x flags=0x%x", mapped, len, prot, flags);
     return 0;
+}
+
+extern "C" int DoMapFlexible_nid_no_patch(void** addr, size_t len, int prot, int flags, void** mapped) {
+    ValidateOutput(addr);
+    if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
+    return MapAnonymous(addr, len, prot, flags, PS5_PAGE_SIZE, false, false, true, mapped);
 }
 
 int DoMapAnon(void** addr, size_t len, int prot, int flags, size_t alignment, bool exclusive, [[maybe_unused]] bool allowStackReplacement) {

@@ -162,9 +162,10 @@ int _mapFlexible(void** addr, size_t len, int prot, int flags) {
         std::fprintf(stderr, "[memory] flexible memory exhausted: request 0x%zx with 0x%zx of 0x%zx in use\n", len, used, configured);
         return SCE_KERNEL_ERROR_ENOMEM;
     }
-    const int result = DoMapAnon(addr, len, prot, flags);
+    void* mapped = nullptr;
+    const int result = DoMapFlexible_nid_no_patch(addr, len, prot, flags, &mapped);
     if (result == 0) {
-        const auto start = reinterpret_cast<uintptr_t>(*addr);
+        const auto start = reinterpret_cast<uintptr_t>(mapped);
         _releaseFlexibleLocked(start, len);
         g_flexibleRanges[start] = len;
     }
@@ -478,6 +479,8 @@ int APS5_VABI sceKernelCheckedReleaseDirectMemory(int64_t start, size_t len) {
 
 int APS5_VABI sceKernelMtypeprotect(const void* addr, size_t len, int type, int prot) {
  if (len == 0) return 0;
+ std::lock_guard lock(g_flexibleLock);
+ if (HasFlexibleMapping_nid_no_patch(addr, len)) NotImplemented_nid_no_patch(__func__);
  return DoMtypeprotect(addr, len, type, prot, false);
 }
 
