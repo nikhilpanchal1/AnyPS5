@@ -86,6 +86,12 @@ KERNEL_HELPER_READS = {
     "configure_windows_unwind": {"MINGW", "CMAKE_OBJCOPY"},
     "configure_macos_unwind": {"APPLE"},
 }
+STRICT_BUILTINS = set(OPEN) | set(OPEN.values()) | BRANCH | DEFINERS | (SUBJECT_FIRST - {"configure_windows_unwind"}) | {
+    "add_test", "add_custom_command", "enable_language", "set_target_properties", "set_tests_properties", "set_property",
+    "get_target_property", "get_test_property", "get_directory_property", "get_property", "get_filename_component",
+    "separate_arguments", "set", "unset", "option", "string", "list", "math", "file", "find_package", "message",
+    "return", "break", "continue",
+}
 
 
 class SplitError(Exception):
@@ -562,6 +568,20 @@ def variable_effects(command):
         if arguments[:1] != ["EXPR"]:
             unsupported()
         binding(1)
+    elif name == "find_package":
+        package = arguments[0] if arguments else ""
+        options = [argument for argument in arguments[1:] if argument not in {"QUIET", "REQUIRED"}]
+        if package == "Python3" and options == ["COMPONENTS", "Interpreter"]:
+            used.update({"Python3_ROOT_DIR", "Python3_EXECUTABLE"})
+            written.update({"Python3_FOUND", "Python3_Interpreter_FOUND", "Python3_EXECUTABLE"})
+        elif package == "Threads" and not options:
+            used.add("THREADS_PREFER_PTHREAD_FLAG")
+            written.update({"Threads_FOUND", "CMAKE_THREAD_LIBS_INIT", "CMAKE_USE_PTHREADS_INIT", "CMAKE_USE_WIN32_THREADS_INIT",
+                            "CMAKE_USE_SPROC_INIT", "CMAKE_HP_PTHREADS_INIT"})
+        else:
+            unsupported()
+        used.update({"CMAKE_MODULE_PATH", "CMAKE_PREFIX_PATH", f"CMAKE_DISABLE_FIND_PACKAGE_{package}",
+                     f"CMAKE_REQUIRE_FIND_PACKAGE_{package}"})
     elif name == "string":
         operation = arguments[0] if arguments else ""
         outputs = {"FIND": 3, "REPLACE": 3, "CONCAT": 1, "JOIN": 2, "TOLOWER": 2, "TOUPPER": 2,
@@ -596,14 +616,9 @@ def variable_effects(command):
             unsupported()
     elif name == "file":
         operation = arguments[0] if arguments else ""
-        outputs = {"READ": 2, "STRINGS": 2, "TIMESTAMP": 2, "SIZE": 2, "READ_SYMLINK": 2, "REAL_PATH": 2,
-                   "RELATIVE_PATH": 1, "TO_CMAKE_PATH": 2, "TO_NATIVE_PATH": 2, "GLOB": 1, "GLOB_RECURSE": 1,
-                   "MD5": 2, "SHA1": 2, "SHA224": 2, "SHA256": 2, "SHA384": 2, "SHA512": 2,
-                   "SHA3_224": 2, "SHA3_256": 2, "SHA3_384": 2, "SHA3_512": 2}
+        outputs = {"RELATIVE_PATH": 1, "TO_CMAKE_PATH": 2, "TO_NATIVE_PATH": 2}
         if operation in outputs:
             binding(outputs[operation])
-            if operation == "STRINGS" and "REGEX" in arguments[3:]:
-                written.update({"CMAKE_MATCH_COUNT"} | {f"CMAKE_MATCH_{index}" for index in range(10)})
         elif operation == "MAKE_DIRECTORY":
             if "RESULT" in arguments[1:]:
                 binding(arguments.index("RESULT", 1) + 1)
@@ -612,6 +627,8 @@ def variable_effects(command):
     elif name in STRICT_OPAQUE or name == "set_property" and arguments[:1] not in (["TARGET"], ["TEST"]):
         unsupported()
     elif name in {"if", "elseif", "while"}:
+        if {"COMMAND", "EXISTS", "IS_READABLE", "IS_WRITABLE", "IS_EXECUTABLE", "IS_DIRECTORY", "IS_SYMLINK", "IS_NEWER_THAN"} & set(arguments):
+            unsupported()
         used.update(argument for argument in arguments if IDENT.fullmatch(argument))
         if "MATCHES" in arguments:
             written.update({"CMAKE_MATCH_COUNT"} | {f"CMAKE_MATCH_{index}" for index in range(10)})
@@ -652,16 +669,26 @@ class Plan:
         context = {"CMAKE_CURRENT_LIST_DIR", "CMAKE_CURRENT_LIST_FILE", "CMAKE_CURRENT_LIST_LINE", "CMAKE_PARENT_LIST_FILE",
                    "CMAKE_CURRENT_FUNCTION_LIST_DIR", "CMAKE_CURRENT_FUNCTION_LIST_FILE", "CMAKE_CURRENT_FUNCTION_LIST_LINE"}
         functions = set()
+        summarized = {atom.node.header for atom in atoms(self.roots)
+                      if isinstance(atom.node, Block) and atom.node.header.name == "function"}
+        known_functions = {command.arguments[0].lower() for command in summarized if command.arguments and literal(command.arguments[0])}
+        function_commands = {command for node in wrappers(self.roots) if node.header.name == "function" for command in flatten(node)}
         for root in self.roots:
             for command in flatten(root):
                 if any(re.search(r"\$(?:ENV|CACHE)?\{[^}]*\$(?:ENV|CACHE)?\{", argument) for argument in command.arguments):
                     raise SplitError(f"line {command.first + 1}: a computed variable reference requires a manual migration")
-                used = set().union(*(set(VARIABLE.findall(argument)) for argument in command.arguments))
+                used, _written = variable_effects(command)
+                if command.name not in STRICT_BUILTINS | set(KERNEL_HELPER_READS) | known_functions:
+                    raise SplitError(f"line {command.first + 1}: unknown command {command.name} requires a manual migration")
                 if used & context:
                     name = sorted(used & context)[0]
                     raise SplitError(f"line {command.first + 1}: list context {name} requires a manual migration")
                 arguments = command.arguments
+                if command.name in {"return", "break", "continue"} and command not in function_commands:
+                    raise SplitError(f"line {command.first + 1}: escaping {command.name} requires a manual migration")
                 if command.name == "function":
+                    if command not in summarized:
+                        raise SplitError(f"line {command.first + 1}: a nested or compound helper definition requires a manual migration")
                     name = arguments[0].lower() if arguments else ""
                     if not name or not literal(name) or name in functions:
                         raise SplitError(f"line {command.first + 1}: a computed or repeated helper definition requires a manual migration")
@@ -695,20 +722,54 @@ class Plan:
                     + ([] if isinstance(atom.node, Block) and atom.node.header.name == "function" else list(atom.flat()))
                     for atom in self.atoms]
         effects = {command: variable_effects(command) for calls in commands for command in calls}
-        initializers = {name for _used, written in effects.values() for name in written if name.startswith("CMAKE_")}
+        mentioned = set().union(*(used | written for root in self.roots for command in flatten(root)
+                                  for used, written in [variable_effects(command)]))
+        for command, (used, written) in effects.items():
+            if command.name == "find_package":
+                package = command.arguments[0]
+                names = {name for name in mentioned if name.startswith((package + "_", "_" + package + "_"))}
+                used |= names
+                written |= names
+        initializers = {name for command, (_used, written) in effects.items() if command.name != "find_package"
+                        for name in written if name.startswith("CMAKE_")}
         target_calls = DEFINERS | SUBJECT_FIRST | set(HELPERS) | set(functions) | {"configure_host_test_executable"}
-        function_reads, function_calls, parameters = {}, {}, {}
+        function_reads, function_calls, parameters, derived_helpers = {}, {}, {}, set()
         for name, node in functions.items():
             function_reads[name], function_calls[name] = set(), set()
             parameters[name] = set(node.header.arguments[1:])
+            subject = "${" + node.header.arguments[1] + "}" if len(node.header.arguments) > 1 else None
+            owner = node.header.arguments[1] if subject else None
+            created_tests = {command.arguments[1] if command.arguments[:1] == ["NAME"] else command.arguments[0]
+                             for command in flatten(node) if command.name == "add_test" and command.arguments}
+            if created_tests - {subject}:
+                derived_helpers.add(name)
             for command in flatten(node):
                 if command is node.header or command is node.end:
                     continue
-                if (command.name == "function" or command.name in {"get_target_property", "get_test_property"}
+                if (command.name == "function" or command.name in {"get_target_property", "get_test_property", "find_package"}
                         or command.name == "get_property" and command.arguments[1:2] in (["TARGET"], ["TEST"])
                         or command.name in {"if", "elseif", "while"} and {"TARGET", "TEST"} & set(command.arguments)):
                     raise SplitError(f"line {command.first + 1}: helper scope or target introspection requires a manual migration")
-                command_used, _written = variable_effects(command)
+                arguments = command.arguments
+                subjects = []
+                test_subjects = command.name in {"add_test", "set_tests_properties", "add_asan_test_options"}
+                if command.name in DEFINERS | SUBJECT_FIRST | set(KERNEL_HELPER_READS) | set(functions):
+                    subjects = arguments[:1]
+                elif command.name == "add_test":
+                    subjects = arguments[1:2] if arguments[:1] == ["NAME"] else arguments[:1]
+                elif command.name in {"set_target_properties", "set_tests_properties"}:
+                    subjects = until(arguments, {"PROPERTIES", "DIRECTORY"})
+                elif command.name == "set_property" and arguments[:1] in (["TARGET"], ["TEST"]):
+                    subjects = until(arguments[1:], {"PROPERTY", "APPEND", "APPEND_STRING", "DIRECTORY"})
+                    test_subjects = arguments[0] == "TEST"
+                elif command.name == "add_custom_command" and arguments[:1] == ["TARGET"]:
+                    subjects = arguments[1:2]
+                if any(not subject or item != subject and not (test_subjects and item in created_tests
+                       and subject in item and set(VARIABLE.findall(item)) == {owner}) for item in subjects):
+                    raise SplitError(f"line {command.first + 1}: helper mutates another target or test; migrate it by hand")
+                command_used, command_written = variable_effects(command)
+                if owner in command_written or command.name == "foreach" and arguments[:1] == [owner]:
+                    raise SplitError(f"line {command.first + 1}: helper rebinds its owner parameter; migrate it by hand")
                 function_reads[name] |= command_used
                 function_reads[name].update(KERNEL_HELPER_READS.get(command.name, ()))
                 if command.name in target_calls:
@@ -720,9 +781,10 @@ class Plan:
         while True:
             fresh = {name: (used | set().union(*(function_reads[callee] for callee in function_calls[name]))) - parameters[name]
                      for name, used in function_reads.items()}
-            if fresh == function_reads:
+            fresh_derived = derived_helpers | {name for name, callees in function_calls.items() if callees & derived_helpers}
+            if fresh == function_reads and fresh_derived == derived_helpers:
                 break
-            function_reads = fresh
+            function_reads, derived_helpers = fresh, fresh_derived
         definitions, readers, targets, tests = {}, {}, {}, {}
 
         def preserve(first, last, reason):
@@ -736,11 +798,31 @@ class Plan:
                 targets.setdefault(target, []).append(index)
             for test in facts.tests:
                 tests.setdefault(test, []).append(index)
+            for command in commands[index]:
+                if command.name == "find_package":
+                    generated = ("Threads::Threads",) if command.arguments[0] == "Threads" else (
+                        "Python3::Interpreter", "Python3::InterpreterDebug", "Python3::InterpreterMultiConfig")
+                    for target in generated:
+                        targets.setdefault(target, []).append(index)
+        conditions = {}
+        for index, atom in enumerate(self.atoms):
+            for condition in atom.conditions:
+                conditions.setdefault(condition, set()).add(self.units[index])
+        for condition, owners in conditions.items():
+            if len(owners) < 2:
+                continue
+            used, _written = variable_effects(condition.header)
+            mutations = set().union(*(effects[command][1] if command in effects else variable_effects(command)[1]
+                                      for command in flatten(condition)))
+            if {"TARGET", "TEST", "COMMAND"} & set(condition.header.arguments) or used & mutations:
+                raise SplitError(f"line {condition.first + 1}: a duplicated mutable condition requires a manual migration")
         for index, (atom, facts) in enumerate(zip(self.atoms, self.facts)):
             used, written = set(), set()
             referenced_targets = facts.subject_targets - facts.targets
             referenced_tests = facts.subject_tests - set(facts.tests)
             for command in commands[index]:
+                if self.units[index] and command.name in derived_helpers:
+                    raise SplitError(f"line {command.first + 1}: a moved helper creates derived test names; migrate it by hand")
                 command_used, command_written = effects[command]
                 used |= command_used
                 used |= function_reads.get(command.name, set())
@@ -1143,6 +1225,27 @@ def apply_change(base, change, lists, read, execution=(), spec=AGC_SPEC):
     return written, conflicted
 
 
+def check_resolution_attributes(root, path):
+    fields = git(root, "check-attr", "-z", "working-tree-encoding", "filter", "--", path).split("\0")
+    if fields[-1:] == [""]:
+        fields.pop()
+    if len(fields) != 6:
+        raise SplitError(f"cannot determine Git's content conversion attributes for {path}; preserve it and resolve it by hand")
+    attributes = {fields[index + 1]: fields[index + 2] for index in (0, 3)}
+    encoding = attributes["working-tree-encoding"]
+    if encoding not in ("unspecified", "unset") and encoding.upper() not in ("UTF-8", "UTF8"):
+        raise SplitError(f"{path} uses working-tree-encoding={encoding}; resolve supports UTF-8 working-tree files only")
+    content_filter = attributes["filter"]
+    reserved_driver = content_filter in ("unspecified", "unset") and git(
+        root, "config", "--name-only", "--get-regexp", f"^filter\\.{content_filter}\\.(clean|smudge|process)$", check=False).strip()
+    if content_filter not in ("unspecified", "unset") or reserved_driver:
+        raise SplitError(f"{path} uses a Git content filter ({content_filter}); preserve it and resolve it by hand")
+    conversion = subprocess.run(["git", "-c", "core.safecrlf=false", "hash-object", f"--path={path}", "--stdin"], cwd=root,
+                                input=b"a\n", capture_output=True)
+    if conversion.returncode or conversion.stderr:
+        raise SplitError(f"{path} has unsupported Git content conversion attributes; preserve it and resolve it by hand")
+
+
 def conflict_marker_size(root, path):
     attribute = git(root, "check-attr", "-z", "conflict-marker-size", "--", path).split("\0")
     if len(attribute) < 3:
@@ -1215,19 +1318,28 @@ def check_fragment_worktree(root, path):
 
 
 def command_resolve(root, spec=AGC_SPEC):
-    stages = {}
+    stages, modes = {}, {}
     for line in git(root, "ls-files", "-u", "--", spec.lists).splitlines():
         meta, _ = line.split("\t", 1)
-        _, sha, stage = meta.split()
+        mode, sha, stage = meta.split()
         stages[stage] = sha
+        modes[stage] = mode
     if not {"1", "2", "3"} <= set(stages):
         sys.exit(f"{spec.lists} is not in a three-way conflict")
-    base, ours, theirs = (git(root, "cat-file", "-p", stages[stage]) for stage in "123")
+    try:
+        parent = root / spec.lists
+        if parent.is_symlink() or not parent.is_file() or any(mode not in ("100644", "100755") for mode in modes.values()):
+            raise SplitError("the conflicted parent must be a regular file in the working tree and every index stage; preserve it and resolve it by hand")
+        check_resolution_attributes(root, spec.lists)
+        base, ours, theirs = (git(root, "cat-file", "-p", stages[stage]) for stage in "123")
+    except (SplitError, OSError, UnicodeError, subprocess.CalledProcessError) as error:
+        sys.exit(f"{spec.lists}: {error}")
     if is_split(base, spec) or is_split(ours, spec) == is_split(theirs, spec):
         sys.exit(f"{spec.lists}: the conflict is not between a change made before the split and the split; resolve it by hand")
     lists, change = (ours, theirs) if is_split(ours, spec) else (theirs, ours)
 
     def read(path):
+        check_resolution_attributes(root, path)
         file = root / path
         text = file.read_text(encoding="utf-8") if file.exists() else ""
         size = min(7, conflict_marker_size(root, path))
@@ -1242,7 +1354,7 @@ def command_resolve(root, spec=AGC_SPEC):
             raise SplitError("unresolved fragment conflicts in " + ", ".join(unmerged) + "; resolve and stage them before running resolve")
         check_parent_conflict(root, spec.lists, base, ours, theirs)
         written, conflicted = apply_change(base, change, lists, read, known_targets(root, spec), spec)
-    except (SplitError, OSError, subprocess.CalledProcessError) as error:
+    except (SplitError, OSError, UnicodeError, subprocess.CalledProcessError) as error:
         sys.exit(f"{spec.lists}: {error}")
     written.setdefault(spec.lists, lists)
     for path, text in written.items():

@@ -290,7 +290,13 @@ def select(graph, changed, reasons=None):
     if unknown_fragments:
         return None, unknown_fragments
     files = set(changed)
-    dirs = tuple(f.rpartition("/")[0] + "/" for f in changed if "/" in f and (LOCAL.search(f) or f not in known))
+    directories = []
+    for path in changed:
+        if "/" in path and (LOCAL.search(path) or path not in known):
+            fragment = REGISTRATION_FRAGMENT.search(path)
+            directory = path[:fragment.start()] if fragment else path.rpartition("/")[0]
+            directories.append(directory + "/" if directory else "")
+    dirs = tuple(directories)
     picked = set()
     for name, test in tests.items():
         scope = closures.get(test["target"], set()) | set(test["arguments"])

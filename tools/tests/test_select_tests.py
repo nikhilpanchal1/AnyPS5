@@ -159,6 +159,40 @@ class FragmentSelectionTests(unittest.TestCase):
 
 
 class SelectFragmentTests(SelectFixture):
+    def test_fragment_target_changes_keep_tests_registered_in_the_parent(self):
+        cmake = self.source / "alpha/CMakeLists.txt"
+        source = self.source / "alpha/main.c"
+        original, original_source = cmake.read_text(encoding="utf-8"), source.read_text(encoding="utf-8")
+        fragment = self.source / "alpha/tests/cmake/alpha_tests.cmake"
+        fragment.parent.mkdir(parents=True, exist_ok=True)
+        target = "add_executable(alpha_tests main.c)\n"
+        alpha = "add_test(NAME alpha COMMAND alpha_tests)\n"
+        try:
+            source.write_text("#ifndef BREAK_EXIT\n#define BREAK_EXIT 0\n#endif\n"
+                              "int main(int argc, char **argv) { return argc > 1 ? 0 : BREAK_EXIT; }\n", encoding="utf-8")
+            fragment.write_text(target + original.removeprefix(target + alpha), encoding="utf-8")
+            cmake.write_text("include(${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/alpha_tests.cmake)\n" + alpha, encoding="utf-8")
+            subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build)], check=True, capture_output=True)
+            graph = self.build / "shared-fragment-graph.json"
+            self.tool("dump", self.build, graph)
+            with fragment.open("a", encoding="utf-8") as file:
+                file.write("target_compile_definitions(alpha_tests PRIVATE BREAK_EXIT=1)\n")
+            subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build)], check=True, capture_output=True)
+            self.assertEqual(self.select("alpha/tests/cmake/alpha_tests.cmake", graph=graph)[1],
+                             {"alpha", "alpha_data", "script"})
+            subprocess.run(["cmake", "--build", str(self.build)], check=True, capture_output=True)
+            result = subprocess.run([sys.executable, str(TOOL), "ctest", str(self.build), "--output-on-failure"],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertRegex(result.stdout, r"Test +#\d+: alpha +.*Failed")
+            self.assertRegex(result.stdout, r"Test +#\d+: alpha_data +.*Passed")
+        finally:
+            source.write_text(original_source, encoding="utf-8")
+            cmake.write_text(original, encoding="utf-8")
+            fragment.unlink(missing_ok=True)
+            subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build)], check=True, capture_output=True)
+            subprocess.run(["cmake", "--build", str(self.build)], check=True, capture_output=True)
+
     def test_existing_fragment_with_moved_registrations_requires_a_full_run(self):
         cmake = self.source / "alpha/CMakeLists.txt"
         original = cmake.read_text(encoding="utf-8")

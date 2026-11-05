@@ -295,6 +295,124 @@ def kernel_original(blocks=(KERNEL_ALPHA, KERNEL_BETA), library="Export.cpp", pr
 
 
 class KernelSplitTests(unittest.TestCase):
+    def test_implicit_list_context_reads_require_manual_migration(self):
+        commands = ("if(CMAKE_CURRENT_LIST_FILE MATCHES \"/CMakeLists.txt$\")\n" + KERNEL_ALPHA + "endif()\n",
+                    "list(LENGTH CMAKE_CURRENT_LIST_DIR context_length)\n" + KERNEL_ALPHA,
+                    "foreach(context IN LISTS CMAKE_CURRENT_LIST_DIR)\n" + KERNEL_ALPHA + "endforeach()\n")
+        for command in commands:
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(agc_test_split.SplitError, "list context"):
+                    agc_test_split.migrated(kernel_original((command, KERNEL_BETA)), spec=agc_test_split.KERNEL_SPEC)
+
+    def test_escaping_control_flow_requires_manual_migration(self):
+        for command in ("return()", "break()", "continue()"):
+            with self.subTest(command=command):
+                text = kernel_original((KERNEL_ALPHA, "if(UNIX)\n" + command + "\nendif()\n", KERNEL_BETA))
+                with self.assertRaisesRegex(agc_test_split.SplitError, "escaping"):
+                    agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_return_inside_a_registration_function_preserves_its_scope(self):
+        prefix = ("function(register_case target)\nif(FALSE)\nreturn()\nendif()\n"
+                  "add_executable(${target} tests/Alpha.cpp)\nendfunction()\n")
+        text = kernel_original(("register_case(kernel_alpha_tests)\n", KERNEL_BETA), prefix=prefix)
+        lists, fragments = agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+        self.assertIn(prefix, lists)
+        self.assertIn("register_case(kernel_alpha_tests)", fragments["kernel_alpha_tests"])
+
+    def test_duplicated_conditions_cannot_observe_their_own_registrations_or_writes(self):
+        for condition, between in (("NOT TARGET kernel_alpha_tests", ""), ("NOT TEST kernel_alpha", ""),
+                                   ("registerCases", "set(registerCases FALSE)\n")):
+            with self.subTest(condition=condition):
+                block = "if(" + condition + ")\n" + KERNEL_ALPHA + between + KERNEL_BETA + "endif()\n"
+                text = kernel_original((block,), prefix="set(registerCases TRUE)\n")
+                with self.assertRaisesRegex(agc_test_split.SplitError, "duplicated mutable condition"):
+                    agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_local_helper_cannot_mutate_another_target(self):
+        for subject in ("kernel_zeta_tests", "${fixture}"):
+            with self.subTest(subject=subject):
+                prefix = ("function(configure_case target fixture)\n"
+                          "target_compile_definitions(" + subject + " PRIVATE SHARED_FIXTURE)\nendfunction()\n")
+                text = kernel_original((KERNEL_BETA.replace("beta", "zeta"), KERNEL_ALPHA,
+                                        "configure_case(kernel_alpha_tests kernel_zeta_tests)\n"), prefix=prefix)
+                with self.assertRaisesRegex(agc_test_split.SplitError, "helper mutates another target or test"):
+                    agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_local_helper_can_mutate_its_first_target_parameter(self):
+        prefix = ("function(configure_case target fixture)\n"
+                  "target_compile_definitions(${target} PRIVATE SHARED_FIXTURE)\n"
+                  "target_link_libraries(${target} PRIVATE ${fixture})\nendfunction()\n")
+        text = kernel_original((KERNEL_BETA.replace("beta", "zeta"), KERNEL_ALPHA,
+                                "configure_case(kernel_alpha_tests kernel_zeta_tests)\n"), prefix=prefix)
+        _lists, fragments = agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+        self.assertIn("configure_case(kernel_alpha_tests kernel_zeta_tests)", fragments["kernel_alpha_tests"])
+
+    def test_local_helper_cannot_rebind_its_owner_parameter(self):
+        for command in ("set(target kernel_zeta_tests)", "string(REPLACE alpha zeta target ${target})",
+                        "foreach(target IN ITEMS kernel_zeta_tests)\nendforeach()"):
+            with self.subTest(command=command):
+                prefix = ("function(configure_case target)\n" + command + "\n"
+                          "target_compile_definitions(${target} PRIVATE SHARED_FIXTURE)\nendfunction()\n")
+                text = kernel_original((KERNEL_BETA.replace("beta", "zeta"), KERNEL_ALPHA,
+                                        "configure_case(kernel_alpha_tests)\n"), prefix=prefix)
+                with self.assertRaisesRegex(agc_test_split.SplitError, "helper rebinds its owner parameter"):
+                    agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_moved_helper_with_derived_test_names_requires_manual_migration(self):
+        prefix = ("function(register_case target)\nadd_test(NAME ${target}_case COMMAND ${target})\nendfunction()\n")
+        text = kernel_original((KERNEL_ALPHA, "register_case(kernel_alpha_tests)\n"
+                                "set_tests_properties(kernel_alpha_tests_case PROPERTIES TIMEOUT 10)\n", KERNEL_BETA), prefix=prefix)
+        with self.assertRaisesRegex(agc_test_split.SplitError, "moved helper creates derived test names"):
+            agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_command_presence_conditions_require_manual_migration(self):
+        prefix = ("if(COMMAND configure_extra)\n" + KERNEL_ALPHA + "endif()\n"
+                  "function(configure_extra target)\ntarget_compile_definitions(${target} PRIVATE EXTRA)\nendfunction()\n")
+        with self.assertRaisesRegex(agc_test_split.SplitError, "unsupported if\\(COMMAND\\)"):
+            agc_test_split.migrated(kernel_original((KERNEL_BETA,), prefix=prefix), spec=agc_test_split.KERNEL_SPEC)
+
+    def test_only_known_standard_package_finders_are_automatic(self):
+        for command in ("find_package(Foo)", "find_package(Python3 COMPONENTS Development QUIET)",
+                        "find_package(Threads CONFIG REQUIRED)"):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(agc_test_split.SplitError, "unsupported find_package"):
+                    agc_test_split.migrated(kernel_original(prefix=command + "\n"), spec=agc_test_split.KERNEL_SPEC)
+
+    def test_standard_package_variable_and_target_conditions_cannot_be_hoisted(self):
+        for package, options, conditions in (("Python3", "COMPONENTS Interpreter QUIET", ("Python3_FOUND", "TARGET Python3::Interpreter")),
+                                             ("Threads", "REQUIRED", ("Threads_FOUND", "TARGET Threads::Threads"))):
+            for condition in conditions:
+                with self.subTest(package=package, condition=condition):
+                    prefix = "if(" + condition + ")\n" + KERNEL_ALPHA + "endif()\nfind_package(" + package + " " + options + ")\n"
+                    with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+                        agc_test_split.migrated(kernel_original((KERNEL_BETA,), prefix=prefix), spec=agc_test_split.KERNEL_SPEC)
+
+    def test_unknown_external_helpers_require_manual_migration(self):
+        for helper in (False, True):
+            with self.subTest(helper=helper):
+                call = "external_configure(kernel_alpha_tests)\n"
+                prefix = "function(configure_case target)\nexternal_configure(${target})\nendfunction()\n" if helper else ""
+                text = kernel_original((KERNEL_ALPHA, "configure_case(kernel_alpha_tests)\n" if helper else call), prefix=prefix)
+                with self.assertRaisesRegex(agc_test_split.SplitError, "unknown command external_configure"):
+                    agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_only_summarized_local_helper_definitions_are_automatic(self):
+        helper = "function(configure_case target)\ntarget_compile_definitions(${target} PRIVATE EXTRA)\nendfunction()\n"
+        for prefix in ("if(TRUE)\n" + helper + "else()\nmessage(STATUS unused)\nendif()\n",
+                       "foreach(case IN ITEMS one)\n" + helper + "endforeach()\n"):
+            with self.subTest(prefix=prefix):
+                text = kernel_original((KERNEL_ALPHA, "configure_case(kernel_alpha_tests)\n", KERNEL_BETA), prefix=prefix)
+                with self.assertRaisesRegex(agc_test_split.SplitError, "nested or compound helper definition"):
+                    agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
+
+    def test_filesystem_observation_requires_manual_migration(self):
+        for command in ("file(READ source.txt source)", "file(STRINGS source.txt sources)", "file(SHA256 source.txt digest)",
+                        "file(GLOB sources *.cpp)", "if(EXISTS marker)\nmessage(STATUS exists)\nendif()",
+                        "if(IS_DIRECTORY directory)\nmessage(STATUS directory)\nendif()"):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(agc_test_split.SplitError, "unsupported .* effects require a manual migration"):
+                    agc_test_split.migrated(kernel_original(prefix=command + "\n"), spec=agc_test_split.KERNEL_SPEC)
+
     def test_computed_variable_reads_require_manual_migration_in_helpers_too(self):
         for source in ("${${selector}}", "${source_${selector}}", "$ENV{${selector}}", "$CACHE{${selector}}"):
             for helper in (False, True):
@@ -409,7 +527,8 @@ class KernelSplitTests(unittest.TestCase):
                         "add_test_executable(kernel_zeta_tests ${shared_source})\n" + after + "\n"
                         "add_test_executable(kernel_alpha_tests ${shared_source})\n"
                         "endif()\n")
-                with self.assertRaisesRegex(agc_test_split.SplitError, "order"):
+                diagnostic = "order" if before.startswith("list") else "unsupported file"
+                with self.assertRaisesRegex(agc_test_split.SplitError, diagnostic):
                     agc_test_split.migrated(text, spec=agc_test_split.KERNEL_SPEC)
 
     def test_property_keywords_are_not_variable_writes(self):

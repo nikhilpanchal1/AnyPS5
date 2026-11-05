@@ -397,7 +397,7 @@ if(BUILD_TESTING)
         foreach(test_case IN LISTS libkernel_split_safety_cases)
             string(REGEX REPLACE "^    def (test_[A-Za-z0-9_]+).*" "\\1" test_case "${test_case}")
             add_test(NAME libkernel_test_split_safety_${test_case} COMMAND ${Python3_EXECUTABLE}
-                "${libkernel_split_safety_source}" ResolveSafetyTests.${test_case})
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_libkernel_test_split_safety.py" ResolveSafetyTests.${test_case})
             set_tests_properties(libkernel_test_split_safety_${test_case} PROPERTIES TIMEOUT 20)
         endforeach()
         add_test(NAME stubgen_stdout_newlines COMMAND ${Python3_EXECUTABLE}

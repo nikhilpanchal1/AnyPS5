@@ -53,9 +53,9 @@ class ResolveSafetyTests(unittest.TestCase):
             self.write(self.fragment("independent_tests"), 'message(STATUS "base")\n')
         self.commit("build: register tests")
 
-    def branches(self, fragment_conflict=None):
+    def branches(self, fragment_conflict=None, changed_alpha=None):
         self.git("checkout", "-qb", "change")
-        changed = KERNEL_ALPHA.replace("TIMEOUT 20", "TIMEOUT 25")
+        changed = changed_alpha if changed_alpha is not None else KERNEL_ALPHA.replace("TIMEOUT 20", "TIMEOUT 25")
         self.write(self.spec.lists, kernel_original((changed, KERNEL_BETA)) + self.parent_suffix)
         if fragment_conflict == "add":
             alpha = KERNEL_ALPHA.replace("PRIVATE libkernel libc", "PRIVATE libkernel libc PRIVATE_FIX")
@@ -79,8 +79,15 @@ class ResolveSafetyTests(unittest.TestCase):
         self.assertTrue(self.git("ls-files", "-u", "--", self.spec.lists).stdout)
 
     def snapshot(self):
-        files = {str(path.relative_to(self.root)): path.read_bytes() for path in self.root.rglob("*")
-                 if path.is_file() and path.relative_to(self.root).parts[0] != ".git"}
+        files = {}
+        for path in self.root.rglob("*"):
+            relative = path.relative_to(self.root)
+            if relative.parts[0] == ".git":
+                continue
+            if path.is_symlink():
+                files[str(relative)] = ("symlink", str(path.readlink()))
+            elif path.is_file():
+                files[str(relative)] = ("file", path.stat().st_mode & 0o777, path.read_bytes())
         return files, self.git("ls-files", "--stage", "-z").stdout, self.git("ls-files", "-v", "-z").stdout
 
     def assert_refused_unchanged(self, message):
@@ -324,6 +331,117 @@ class ResolveSafetyTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("TIMEOUT 25", self.read(fragment))
                 self.assertIn("100755" if executable else "100644", self.git("ls-files", "--stage", "--", fragment).stdout)
+
+    def test_non_utf8_fragment_conversion_is_refused_before_writing(self):
+        self.repository("latin1-fragments")
+        self.write(".gitattributes", "*.cmake working-tree-encoding=ISO-8859-1\n")
+        self.commit("build: configure fragment encoding")
+        self.branches(changed_alpha=KERNEL_ALPHA.replace("TIMEOUT 20", 'TIMEOUT 25 LABELS "café"'))
+        self.stop("rebase", False)
+        self.assert_refused_unchanged("working-tree-encoding=ISO-8859-1")
+
+    def test_parent_encoding_is_checked_before_utf8_reads(self):
+        self.repository("latin1-parent", parent_suffix='set(production_label "café")\n')
+        self.branches()
+        self.stop("rebase", False)
+        parent = self.root / self.spec.lists
+        parent.write_bytes(self.read(self.spec.lists).encode("iso-8859-1"))
+        self.write(".gitattributes", f"{self.spec.lists} working-tree-encoding=ISO-8859-1\n")
+        self.assert_refused_unchanged("working-tree-encoding=ISO-8859-1")
+
+    def test_custom_parent_and_fragment_content_filters_are_refused(self):
+        for parent in (True, False):
+            for driver in ("review", "unset", "unspecified"):
+                with self.subTest(parent=parent, driver=driver):
+                    self.repository(f"{parent}-{driver}")
+                    self.branches()
+                    self.stop("rebase", False)
+                    command = f'"{sys.executable}" -c "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"'
+                    self.git("config", f"filter.{driver}.clean", command)
+                    self.git("config", f"filter.{driver}.smudge", command)
+                    path = self.spec.lists if parent else self.fragment("kernel_alpha_tests")
+                    self.write(".gitattributes", f"{path} filter={driver}\n")
+                    self.assert_refused_unchanged(f"uses a Git content filter ({driver})")
+
+    def test_invalid_literal_encoding_status_names_are_refused_without_writes(self):
+        for encoding in ("unset", "unspecified"):
+            with self.subTest(encoding=encoding):
+                self.repository(encoding)
+                self.branches()
+                self.stop("rebase", False)
+                self.write(".gitattributes", f"{self.spec.lists} working-tree-encoding={encoding}\n")
+                self.assert_refused_unchanged("unsupported Git content conversion attributes")
+
+    def test_utf8_and_unconfigured_regular_files_keep_non_ascii_labels(self):
+        for encoding in (None, "UTF-8", "UTF8"):
+            with self.subTest(encoding=encoding):
+                self.repository(str(encoding))
+                if encoding:
+                    self.write(".gitattributes", f"*.cmake working-tree-encoding={encoding}\n"
+                               f"{self.spec.lists} working-tree-encoding={encoding}\n")
+                    self.commit("build: configure UTF-8 checkout")
+                self.branches(changed_alpha=KERNEL_ALPHA.replace("TIMEOUT 20", 'TIMEOUT 25 LABELS "café"'))
+                self.stop("rebase", False)
+                result = self.tool()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                fragment = self.fragment("kernel_alpha_tests")
+                self.assertIn('LABELS "café"', self.read(fragment))
+                self.assertEqual(self.git("show", ":" + fragment).stdout, self.read(fragment))
+
+    def test_unrelated_fragment_attributes_do_not_block_resolution(self):
+        self.repository("unrelated-conversion")
+        self.branches()
+        self.stop("rebase", False)
+        fragment = self.fragment("kernel_beta_tests")
+        original = (self.root / fragment).read_bytes()
+        self.write(".gitattributes", f"{fragment} working-tree-encoding=ISO-8859-1 filter=unrelated\n")
+        result = self.tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / fragment).read_bytes(), original)
+        self.assertIn("TIMEOUT 25", self.read(self.fragment("kernel_alpha_tests")))
+
+    def test_invalid_utf8_is_reported_without_writes_or_traceback(self):
+        for parent in (True, False):
+            with self.subTest(parent=parent):
+                self.repository(str(parent))
+                self.branches()
+                self.stop("rebase", False)
+                path = self.root / (self.spec.lists if parent else self.fragment("kernel_alpha_tests"))
+                path.write_bytes(path.read_bytes() + b"\xff")
+                self.assert_refused_unchanged("utf-8")
+
+    @unittest.skipIf(sys.platform == "win32", "needs symbolic link creation")
+    def test_symlinked_parent_preserves_the_link_and_target(self):
+        for mode in ("merge", "rebase"):
+            for split_is_current in (True, False):
+                with self.subTest(mode=mode, split_is_current=split_is_current):
+                    self.repository(f"{mode}-{split_is_current}")
+                    self.branches()
+                    self.stop(mode, split_is_current)
+                    parent = self.root / self.spec.lists
+                    target = self.root / "saved-conflict.txt"
+                    original = parent.read_bytes()
+                    target.write_bytes(original)
+                    parent.unlink()
+                    parent.symlink_to(target)
+                    self.assert_refused_unchanged("parent must be a regular file")
+                    self.assertTrue(parent.is_symlink())
+                    self.assertEqual(parent.readlink(), target)
+                    self.assertEqual(target.read_bytes(), original)
+
+    def test_non_regular_parent_index_stages_are_refused(self):
+        for stage in ("1", "2", "3"):
+            with self.subTest(stage=stage):
+                self.repository(stage)
+                self.branches()
+                self.stop("rebase", False)
+                entries = self.git("ls-files", "-u", "--", self.spec.lists).stdout.splitlines()
+                entry = next(line for line in entries if line.split("\t", 1)[0].split()[2] == stage)
+                _, blob, _ = entry.split("\t", 1)[0].split()
+                result = subprocess.run(["git", "update-index", "--index-info"], cwd=self.root, capture_output=True,
+                                        text=True, input=f"120000 {blob} {stage}\t{self.spec.lists}\n")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assert_refused_unchanged("parent must be a regular file")
 
 
 if __name__ == "__main__":
